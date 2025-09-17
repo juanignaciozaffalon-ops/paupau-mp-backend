@@ -1,94 +1,47 @@
-// server.js (SDK v2)
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
+// ===== CORS robusto (permite www y sin www, y registra la lista) =====
+const rawAllowed = process.env.ALLOWED_ORIGIN || '';
+// Lista original (tal cual env var)
+const allowList = rawAllowed.split(',').map(s => s.trim()).filter(Boolean);
 
-// === Mercado Pago SDK v2 (CommonJS) ===
-const mercadopago = require('mercadopago');
-// client/config
-const app = express();
+// Normaliza a "host" (sin http/https, sin barra final y sin 'www.')
+const normHost = (s) => {
+  try {
+    const u = new URL(s);
+    return (u.hostname || '').replace(/^www\./, '');
+  } catch {
+    return String(s)
+      .replace(/^https?:\/\//, '')
+      .replace(/\/$/, '')
+      .replace(/^www\./, '');
+  }
+};
 
-// ---------- Config ----------
-const PORT = process.env.PORT || 3000;
-const MP_ACCESS_TOKEN = process.env.MP_ACCESS_TOKEN;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
+// Set con los hosts permitidos
+const allowedHosts = new Set(allowList.map(normHost));
 
-console.log('[boot] PauPau backend…');
-if (!MP_ACCESS_TOKEN) {
-  console.warn('[AVISO] MP_ACCESS_TOKEN no está seteado en .env');
-}
+// Log útil para que lo veas en Render → Logs
+console.log('AllowList CORS (raw):', allowList);
+console.log('AllowList CORS (hosts):', Array.from(allowedHosts));
 
-// CORS
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGIN === '*' || origin === ALLOWED_ORIGIN) return cb(null, true);
-    return cb(new Error('CORS bloqueado para: ' + origin));
-  }
-}));
-app.use(express.json());
+    // Permite herramientas sin Origin (curl/Postman)
+    if (!origin) return cb(null, true);
 
-// === Instanciar cliente y API de Preferencias (v2) ===
-const mpClient = new mercadopago.MercadoPagoConfig({ accessToken: MP_ACCESS_TOKEN });
-const preferenceAPI = new mercadopago.Preference(mpClient);
-
-// Healthcheck
-app.get('/', (req, res) => res.send('PauPau MP Backend OK (v2)'));
-
-// Crear preferencia
-app.post('/crear-preferencia', async (req, res) => {
-  try {
-    const {
-      title = 'Inscripción PauPau',
-      price = 53000,
-      currency = 'ARS',
-      back_urls = {
-        success: 'https://tu-dominio.com/pago-exitoso',
-        failure: 'https://tu-dominio.com/pago-fallido',
-        pending: 'https://tu-dominio.com/pago-pendiente'
-      },
-      metadata = {}
-    } = req.body || {};
-
-    const unit_price = Number(price);
-    if (Number.isNaN(unit_price) || unit_price < 0) {
-      return res.status(400).json({ error: 'Precio inválido' });
+    let host;
+    try {
+      host = new URL(origin).hostname;
+    } catch {
+      host = origin;
     }
+    const normalized = (host || '').replace(/^www\./, '');
 
-    const preferenceBody = {
-      items: [{ title, quantity: 1, unit_price, currency_id: currency }],
-      back_urls,
-      auto_return: 'approved',
-      notification_url: process.env.WEBHOOK_URL || undefined,
-      metadata
-    };
+    const ok = allowedHosts.has(normalized);
+    if (ok) return cb(null, true);
 
-    // v2: create recibe { body: ... }
-    const result = await preferenceAPI.create({ body: preferenceBody });
+    console.error('CORS bloqueado para:', origin, '— allowedHosts:', Array.from(allowedHosts));
+    return cb(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+}));
 
-    // En v2 los campos vienen derechito en result
-    const init_point = result.init_point || result.sandbox_init_point;
-    const id = result.id;
-
-    if (!init_point) return res.status(500).json({ error: 'No se pudo obtener init_point' });
-
-    return res.json({ init_point, id });
-  } catch (err) {
-    console.error('[crear-preferencia] error:', err?.message || err);
-    return res.status(500).json({ error: 'Error creando preferencia' });
-  }
-});
-
-// Webhook (opcional)
-app.post('/webhook', async (req, res) => {
-  try {
-    console.log('[webhook] body:', JSON.stringify(req.body));
-    res.sendStatus(200);
-  } catch (e) {
-    console.error('[webhook] error:', e);
-    res.sendStatus(500);
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
-});
