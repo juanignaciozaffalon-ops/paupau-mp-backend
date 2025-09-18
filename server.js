@@ -55,11 +55,50 @@ try {
 // ===== Health =====
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ===== 1) Listar horarios disponibles (vista) =====
+/* ============================================================
+   Helpers SQL de estado de reservas (sin vista materializada)
+   ------------------------------------------------------------
+   - 'ocupado'   => existe reserva pagada
+   - 'pendiente' => existe reserva pendiente vigente (reservado_hasta > now())
+   - 'disponible' => no existe nada de lo anterior
+============================================================ */
+const STATE_CASE = `
+  CASE
+    WHEN EXISTS (
+      SELECT 1 FROM reservas r
+      WHERE r.horario_id = h.id
+        AND r.estado = 'pagado'
+    ) THEN 'ocupado'
+    WHEN EXISTS (
+      SELECT 1 FROM reservas r
+      WHERE r.horario_id = h.id
+        AND r.estado = 'pendiente'
+        AND r.reservado_hasta IS NOT NULL
+        AND r.reservado_hasta > now()
+    ) THEN 'pendiente'
+    ELSE 'disponible'
+  END
+`;
+
+const DAY_ORDER = `array_position(
+  ARRAY['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo']::text[], h.dia_semana
+)`;
+
+// ===== 1) Listar horarios con estado =====
 app.get('/horarios', async (_req, res) => {
   try {
-    const q = `SELECT horario_id, profesor_id, profesor, dia_semana, hora
-               FROM v_horarios_disponibles`;
+    const q = `
+      SELECT
+        h.id AS horario_id,              -- 👈 ID real de la tabla horarios
+        p.id AS profesor_id,
+        p.nombre AS profesor,
+        h.dia_semana,
+        to_char(h.hora, 'HH24:MI') AS hora,
+        ${STATE_CASE} AS estado
+      FROM horarios h
+      JOIN profesores p ON p.id = h.profesor_id
+      ORDER BY p.nombre, ${DAY_ORDER}, h.hora
+    `;
     const { rows } = await pool.query(q);
     res.json(rows);
   } catch (e) {
@@ -68,7 +107,7 @@ app.get('/horarios', async (_req, res) => {
   }
 });
 
-// ===== 2) HOLD: toma de horario(s) por 10 minutos =====
+// ===== 2) HOLD: toma de un horario por 10 minutos =====
 app.post('/hold', async (req, res) => {
   const { horario_id, alumno_nombre, alumno_email } = req.body || {};
   if (!horario_id) return res.status(400).json({ error: 'bad_request', message: 'horario_id requerido' });
@@ -76,15 +115,27 @@ app.post('/hold', async (req, res) => {
   try {
     await pool.query('BEGIN');
 
-    // ¿Está disponible (según la vista)?
-    const canQ = `SELECT 1 FROM v_horarios_disponibles WHERE horario_id = $1`;
+    // Verificar que NO esté pagado ni pendiente vigente
+    const canQ = `
+      SELECT 1
+      FROM horarios h
+      WHERE h.id = $1
+        AND NOT EXISTS (
+          SELECT 1 FROM reservas r
+          WHERE r.horario_id = h.id
+            AND (
+              r.estado = 'pagado' OR
+              (r.estado = 'pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta > now())
+            )
+        )
+    `;
     const can = await pool.query(canQ, [horario_id]);
     if (can.rowCount === 0) {
       await pool.query('ROLLBACK');
       return res.status(409).json({ error: 'not_available' });
     }
 
-    // Insertar reserva pendiente (10 minutos)
+    // Insertar reserva 'pendiente' por 10 minutos
     const insQ = `
       INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
       VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')
@@ -96,8 +147,7 @@ app.post('/hold', async (req, res) => {
     return res.json({ id: rows[0].id, reservado_hasta: rows[0].reservado_hasta });
   } catch (e) {
     await pool.query('ROLLBACK');
-    // si chocó con el índice único -> ya está tomado
-    if (e && String(e.code) === '23505') {
+    if (String(e.code) === '23505') {         // índice único activo
       return res.status(409).json({ error: 'already_held' });
     }
     console.error('[POST /hold]', e);
@@ -123,7 +173,7 @@ app.post('/release', async (req, res) => {
   }
 });
 
-// ===== 4) Crear preferencia y (opcionalmente) registrar hold si no vino antes =====
+// ===== 4) Crear preferencia (y tomar hold si no vino antes) =====
 app.post('/crear-preferencia', async (req, res) => {
   const { title, price, currency = 'ARS', back_urls = {}, metadata = {}, horario_id } = req.body || {};
   if (!title || typeof title !== 'string') {
@@ -140,12 +190,24 @@ app.post('/crear-preferencia', async (req, res) => {
   }
 
   try {
-    // Si mandan horario_id sin haber hecho /hold, intentamos tomarlo ahora
+    // Si vino horario_id sin /hold previo, intentamos tomarlo ahora
     if (horario_id) {
       try {
         await pool.query('BEGIN');
         const can = await pool.query(
-          `SELECT 1 FROM v_horarios_disponibles WHERE horario_id = $1`,
+          `
+          SELECT 1
+          FROM horarios h
+          WHERE h.id = $1
+            AND NOT EXISTS (
+              SELECT 1 FROM reservas r
+              WHERE r.horario_id = h.id
+                AND (
+                  r.estado = 'pagado' OR
+                  (r.estado = 'pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta > now())
+                )
+            )
+          `,
           [horario_id]
         );
         if (can.rowCount === 0) {
@@ -167,7 +229,7 @@ app.post('/crear-preferencia', async (req, res) => {
       }
     }
 
-    // Crear preferencia MP
+    // Crear preferencia en MP
     const pref = {
       items: [{ title, quantity: 1, unit_price: price, currency_id: currency }],
       back_urls,
@@ -198,15 +260,17 @@ app.post('/webhook', async (req, res) => {
   console.log('[Webhook recibido]', JSON.stringify(evento));
 
   // Ajustá según cómo te llega el webhook de MP.
-  // Suponemos que viene metadata.horario_id
+  // Suponemos metadata.horario_id
   const horario_id = evento?.data?.metadata?.horario_id;
 
   if (evento?.type === 'payment') {
     try {
       if (horario_id) {
-        const q = `UPDATE reservas
-                  SET estado = 'pagado', reservado_hasta = NULL
-                  WHERE horario_id = $1 AND estado = 'pendiente'`;
+        const q = `
+          UPDATE reservas
+          SET estado = 'pagado', reservado_hasta = NULL
+          WHERE horario_id = $1 AND estado = 'pendiente'
+        `;
         await pool.query(q, [horario_id]);
         console.log(`[DB] Reserva confirmada para horario ${horario_id}`);
       }
