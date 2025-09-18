@@ -7,19 +7,22 @@ const { Pool } = require('pg');
 
 const app = express();
 
-// ===== Env =====
-// En Render: MP_ACCESS_TOKEN, ALLOWED_ORIGIN (coma-separadas), DATABASE_URL, WEBHOOK_URL (opcional)
+/* ===== Env =====
+Variables necesarias en Render:
+- MP_ACCESS_TOKEN
+- ALLOWED_ORIGIN         (coma-separadas, ej: https://www.paupaulanguages.com,https://odoo.com)
+- DATABASE_URL           (la URL de Postgres de Render)
+- WEBHOOK_URL (opcional)
+*/
 const PORT     = process.env.PORT || 10000;
 const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
 const ALLOWED  = (process.env.ALLOWED_ORIGIN || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 // ===== Postgres =====
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: false }
 });
 pool.connect()
   .then(() => console.log('[DB] Conectado a Postgres ✅'))
@@ -52,53 +55,77 @@ try {
 // ===== Health =====
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ===== Listar horarios disponibles =====
-// Opcionales: ?idioma=Español|Portugués  &  ?profesor=Nombre
-app.get('/horarios', async (req, res) => {
-  const { idioma, profesor } = req.query;
-
-  // Armamos filtros seguros
-  const conds = [];
-  const vals = [];
-  if (idioma)  { vals.push(idioma);   conds.push(`p.idioma = $${vals.length}`); }
-  if (profesor){ vals.push(profesor); conds.push(`p.nombre = $${vals.length}`); }
-
-  // Un horario está disponible si NO tiene:
-  //  - reserva estado = 'pagado', o
-  //  - reserva estado = 'pendiente' con reservado_hasta > ahora (hold activo)
-  const whereExtra = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
-
-  const sql = `
-    SELECT
-      h.id            AS horario_id,
-      p.nombre        AS profesor,
-      p.idioma        AS idioma,
-      h.dia_semana,
-      to_char(h.hora, 'HH24:MI') AS hora
-    FROM horarios h
-    JOIN profesores p   ON p.id = h.profesor_id
-    LEFT JOIN reservas r ON r.horario_id = h.id
-      AND (r.estado = 'pagado' OR (r.estado = 'pendiente' AND r.reservado_hasta > now()))
-    ${whereExtra}
-      AND r.id IS NULL
-    ORDER BY p.nombre,
-             array_position(ARRAY['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo']::text[], h.dia_semana),
-             h.hora;
-  `;
-
+// ===== 1) Listar horarios disponibles (vista) =====
+app.get('/horarios', async (_req, res) => {
   try {
-    const q = await pool.query(sql, vals);
-    res.json(q.rows);
+    const q = `SELECT horario_id, profesor_id, profesor, dia_semana, hora
+               FROM v_horarios_disponibles`;
+    const { rows } = await pool.query(q);
+    res.json(rows);
   } catch (e) {
-    console.error('[DB /horarios]', e);
-    res.status(500).json({ error: 'db_failed', message: e.message });
+    console.error('[GET /horarios]', e);
+    res.status(500).json({ error: 'db_error' });
   }
 });
 
-// ===== Crear preferencia (y reserva pendiente) =====
+// ===== 2) HOLD: toma de horario(s) por 10 minutos =====
+app.post('/hold', async (req, res) => {
+  const { horario_id, alumno_nombre, alumno_email } = req.body || {};
+  if (!horario_id) return res.status(400).json({ error: 'bad_request', message: 'horario_id requerido' });
+
+  try {
+    await pool.query('BEGIN');
+
+    // ¿Está disponible (según la vista)?
+    const canQ = `SELECT 1 FROM v_horarios_disponibles WHERE horario_id = $1`;
+    const can = await pool.query(canQ, [horario_id]);
+    if (can.rowCount === 0) {
+      await pool.query('ROLLBACK');
+      return res.status(409).json({ error: 'not_available' });
+    }
+
+    // Insertar reserva pendiente (10 minutos)
+    const insQ = `
+      INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
+      VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')
+      RETURNING id, reservado_hasta
+    `;
+    const { rows } = await pool.query(insQ, [horario_id, alumno_nombre || null, alumno_email || null]);
+
+    await pool.query('COMMIT');
+    return res.json({ id: rows[0].id, reservado_hasta: rows[0].reservado_hasta });
+  } catch (e) {
+    await pool.query('ROLLBACK');
+    // si chocó con el índice único -> ya está tomado
+    if (e && String(e.code) === '23505') {
+      return res.status(409).json({ error: 'already_held' });
+    }
+    console.error('[POST /hold]', e);
+    return res.status(500).json({ error: 'db_error' });
+  }
+});
+
+// ===== 3) RELEASE: liberar un hold pendiente =====
+app.post('/release', async (req, res) => {
+  const { reserva_id } = req.body || {};
+  if (!reserva_id) return res.status(400).json({ error: 'bad_request', message: 'reserva_id requerido' });
+  try {
+    const q = `UPDATE reservas
+               SET estado = 'cancelado'
+               WHERE id = $1 AND estado = 'pendiente'
+               RETURNING id`;
+    const r = await pool.query(q, [reserva_id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: 'not_found_or_not_pending' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[POST /release]', e);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+// ===== 4) Crear preferencia y (opcionalmente) registrar hold si no vino antes =====
 app.post('/crear-preferencia', async (req, res) => {
   const { title, price, currency = 'ARS', back_urls = {}, metadata = {}, horario_id } = req.body || {};
-
   if (!title || typeof title !== 'string') {
     return res.status(400).json({ error: 'bad_request', message: 'title requerido (string)' });
   }
@@ -112,112 +139,95 @@ app.post('/crear-preferencia', async (req, res) => {
     return res.status(500).json({ error: 'server_config', message: 'MP_ACCESS_TOKEN no configurado' });
   }
 
-  // 1) Intentar tomar el cupo (hold de 10 min)
   try {
+    // Si mandan horario_id sin haber hecho /hold, intentamos tomarlo ahora
     if (horario_id) {
-      // Inserta o ignora si ya existe una reserva activa para ese horario (índice único)
-      const ins = await pool.query(
-        `INSERT INTO reservas (horario_id, estado, reservado_hasta)
-         VALUES ($1, 'pendiente', now() + interval '10 minutes')
-         ON CONFLICT (horario_id)
-         DO UPDATE SET -- si había algo conflictivo, sólo deja vigente si no está activo
-           estado = CASE
-                      WHEN reservas.estado = 'pendiente' AND reservas.reservado_hasta > now() THEN reservas.estado
-                      WHEN reservas.estado = 'pagado' THEN reservas.estado
-                      ELSE 'pendiente'
-                    END,
-           reservado_hasta = CASE
-                               WHEN reservas.estado = 'pendiente' AND reservas.reservado_hasta > now() THEN reservas.reservado_hasta
-                               WHEN reservas.estado = 'pagado' THEN reservas.reservado_hasta
-                               ELSE now() + interval '10 minutes'
-                             END
-         RETURNING estado, reservado_hasta;`
-      , [horario_id]);
-
-      const row = ins.rows[0];
-      // Si quedó en 'pagado' o quedó 'pendiente' pero con reservado_hasta previo (hold ajeno), rechazamos
-      if (row.estado === 'pagado' || (row.estado === 'pendiente' && row.reservado_hasta < (new Date(Date.now() + 9.5*60*1000)))) {
-        // Nota: esta heurística evita que tomes un hold si otro ya lo tiene activo.
-        return res.status(409).json({ error: 'slot_taken', message: 'El horario ya fue tomado' });
+      try {
+        await pool.query('BEGIN');
+        const can = await pool.query(
+          `SELECT 1 FROM v_horarios_disponibles WHERE horario_id = $1`,
+          [horario_id]
+        );
+        if (can.rowCount === 0) {
+          await pool.query('ROLLBACK');
+          return res.status(409).json({ error: 'not_available' });
+        }
+        await pool.query(
+          `INSERT INTO reservas (horario_id, estado, reservado_hasta)
+           VALUES ($1, 'pendiente', now() + interval '10 minutes')`,
+          [horario_id]
+        );
+        await pool.query('COMMIT');
+      } catch (e) {
+        await pool.query('ROLLBACK');
+        if (String(e.code) === '23505') {
+          return res.status(409).json({ error: 'already_held' });
+        }
+        throw e;
       }
     }
-  } catch (e) {
-    console.error('[DB hold]', e);
-    return res.status(409).json({ error: 'slot_taken', message: 'El horario ya fue tomado' });
-  }
 
-  // 2) Crear preferencia MP
-  try {
+    // Crear preferencia MP
     const pref = {
       items: [{ title, quantity: 1, unit_price: price, currency_id: currency }],
       back_urls,
       auto_return: 'approved',
-      metadata: { ...metadata, horario_id },
-      notification_url: process.env.WEBHOOK_URL || undefined, // para que MP llame a /webhook
+      metadata
     };
-
     const mpResp = await mercadopago.preferences.create(pref);
     const data = mpResp && mpResp.body ? mpResp.body : mpResp;
 
     return res.json({
       id: data.id,
       init_point: data.init_point,
-      sandbox_init_point: data.sandbox_init_point,
+      sandbox_init_point: data.sandbox_init_point
     });
   } catch (e) {
-    console.error('[MP error]', e?.message, '\n[MP error data]', e?.response?.body);
+    console.error('[MP error]', e && e.message, '\n[MP error data]', e?.response?.body);
     return res.status(502).json({
       error: 'mp_failed',
       message: e?.message || 'unknown',
-      details: e?.response?.body || null,
+      details: e?.response?.body || null
     });
   }
 });
 
-// ===== Webhook para confirmar pago =====
-// Configurá WEBHOOK_URL en Render apuntando a https://<tu-servicio>.onrender.com/webhook
+// ===== 5) Webhook de pago (marca pagado) =====
 app.post('/webhook', async (req, res) => {
   const evento = req.body;
   console.log('[Webhook recibido]', JSON.stringify(evento));
 
-  // Según la integración, Mercado Pago puede enviar distinta forma.
-  // Guardamos horario_id en metadata de la preferencia/pago y lo leemos acá:
-  const horario_id =
-    evento?.data?.metadata?.horario_id ||
-    evento?.data?.id && req.query?.horario_id || // fallback por si lo mandás en query
-    null;
+  // Ajustá según cómo te llega el webhook de MP.
+  // Suponemos que viene metadata.horario_id
+  const horario_id = evento?.data?.metadata?.horario_id;
 
-  // Ajustá acá las condiciones de evento segun la cuenta (approved, payment.created, etc.)
-  // Lo simple: si tenemos horario_id, marcamos pagado.
-  if (horario_id) {
+  if (evento?.type === 'payment') {
     try {
-      await pool.query(
-        `UPDATE reservas
-           SET estado='pagado', reservado_hasta = NULL
-         WHERE horario_id=$1`,
-        [horario_id]
-      );
-      console.log(`[DB] Reserva confirmada y bloqueada (horario ${horario_id})`);
+      if (horario_id) {
+        const q = `UPDATE reservas
+                  SET estado = 'pagado', reservado_hasta = NULL
+                  WHERE horario_id = $1 AND estado = 'pendiente'`;
+        await pool.query(q, [horario_id]);
+        console.log(`[DB] Reserva confirmada para horario ${horario_id}`);
+      }
     } catch (e) {
       console.error('[DB error webhook]', e);
     }
   }
-
   res.sendStatus(200);
 });
 
-// ===== Liberar reservas expiradas cada minuto =====
+// ===== 6) Cron: liberar holds vencidos cada minuto =====
 setInterval(async () => {
   try {
-    const result = await pool.query(
+    const r = await pool.query(
       `UPDATE reservas
-          SET estado='cancelado', reservado_hasta = NULL
-        WHERE estado='pendiente'
-          AND reservado_hasta < now()`
+         SET estado = 'cancelado'
+       WHERE estado = 'pendiente'
+         AND reservado_hasta IS NOT NULL
+         AND reservado_hasta < now()`
     );
-    if (result.rowCount > 0) {
-      console.log(`[cron] Reservas liberadas: ${result.rowCount}`);
-    }
+    if (r.rowCount > 0) console.log(`[cron] Reservas liberadas: ${r.rowCount}`);
   } catch (e) {
     console.error('[cron error]', e);
   }
