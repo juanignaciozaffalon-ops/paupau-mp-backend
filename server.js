@@ -86,6 +86,30 @@ app.post('/crear-preferencia', async (req, res) => {
     });
   }
 });
+// ===== RUTA HORARIOS =====
+const { Pool } = require('pg');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+app.get('/horarios', async (req, res) => {
+  try {
+    const query = `
+      SELECT p.nombre, h.dia_semana, to_char(h.hora, 'HH24:MI') as hora
+      FROM horarios h
+      JOIN profesores p ON p.id = h.profesor_id
+      ORDER BY p.nombre,
+        array_position(ARRAY['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo']::text[], h.dia_semana),
+        h.hora;
+    `;
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[DB error]', err.message);
+    res.status(500).json({ error: 'db_failed', message: err.message });
+  }
+});
 
 // ===== 404 =====
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
