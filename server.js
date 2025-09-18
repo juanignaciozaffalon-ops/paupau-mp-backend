@@ -1,6 +1,5 @@
-// server.js — Backend MP + Postgres (SDK v1.5.17 compatible con configure)
+// server.js — Backend MP + Postgres (SDK v1.5.x)
 const express = require('express');
-const cors = require('cors');
 const bodyParser = require('body-parser');
 const mercadopago = require('mercadopago');
 const { Pool } = require('pg');
@@ -8,16 +7,15 @@ const { Pool } = require('pg');
 const app = express();
 
 /* ===== Env =====
-Variables necesarias en Render:
 - MP_ACCESS_TOKEN
-- ALLOWED_ORIGIN         (coma-separadas, ej: https://www.paupaulanguages.com,https://odoo.com)
-- DATABASE_URL           (la URL de Postgres de Render)
-- WEBHOOK_URL            (ej: https://paupau-mp-backend.onrender.com/webhook)
+- ALLOWED_ORIGIN      (coma-separadas, ej: https://www.paupaulanguages.com,https://paupaulanguages.odoo.com)
+- DATABASE_URL
+- WEBHOOK_URL (opcional)
 */
-const PORT         = process.env.PORT || 10000;
-const MP_TOKEN     = process.env.MP_ACCESS_TOKEN;
-const ALLOWED      = (process.env.ALLOWED_ORIGIN || '').split(',').map(s => s.trim()).filter(Boolean);
-const WEBHOOK_URL  = process.env.WEBHOOK_URL || null;
+const PORT     = process.env.PORT || 10000;
+const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
+const ALLOWED  = (process.env.ALLOWED_ORIGIN || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 // ===== Postgres =====
 const pool = new Pool({
@@ -28,7 +26,7 @@ pool.connect()
   .then(() => console.log('[DB] Conectado a Postgres ✅'))
   .catch(err => console.error('[DB] Error de conexión ❌', err));
 
-// ===== CORS =====
+// ===== CORS simple =====
 app.use((req, res, next) => {
   const reqOrigin = req.headers.origin || '';
   const ok = ALLOWED.includes(reqOrigin);
@@ -87,7 +85,7 @@ app.get('/horarios', async (_req, res) => {
       SELECT
         h.id AS horario_id,
         p.id AS profesor_id,
-        p.nombre AS nombre,
+        p.nombre AS profesor,
         h.dia_semana,
         to_char(h.hora, 'HH24:MI') AS hora,
         ${STATE_CASE} AS estado
@@ -103,15 +101,15 @@ app.get('/horarios', async (_req, res) => {
   }
 });
 
-// ===== 2) HOLD: toma de un horario por 10 minutos =====
+// ===== 2) HOLD explícito =====
 app.post('/hold', async (req, res) => {
   const { horario_id, alumno_nombre, alumno_email } = req.body || {};
   if (!horario_id) return res.status(400).json({ error: 'bad_request', message: 'horario_id requerido' });
+  if (!alumno_nombre || !alumno_email) return res.status(400).json({ error: 'bad_request', message: 'alumno_nombre y alumno_email requeridos' });
 
   try {
     await pool.query('BEGIN');
 
-    // Verificar que NO esté pagado ni pendiente vigente
     const canQ = `
       SELECT 1
       FROM horarios h
@@ -131,27 +129,24 @@ app.post('/hold', async (req, res) => {
       return res.status(409).json({ error: 'not_available' });
     }
 
-    // Insertar reserva 'pendiente' por 10 minutos
     const insQ = `
       INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
       VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')
       RETURNING id, reservado_hasta
     `;
-    const { rows } = await pool.query(insQ, [horario_id, alumno_nombre || null, alumno_email || null]);
+    const { rows } = await pool.query(insQ, [horario_id, alumno_nombre, alumno_email]);
 
     await pool.query('COMMIT');
     return res.json({ id: rows[0].id, reservado_hasta: rows[0].reservado_hasta });
   } catch (e) {
     await pool.query('ROLLBACK');
-    if (String(e.code) === '23505') {         // si tuvieras índice único
-      return res.status(409).json({ error: 'already_held' });
-    }
+    if (String(e.code) === '23505') return res.status(409).json({ error: 'already_held' });
     console.error('[POST /hold]', e);
     return res.status(500).json({ error: 'db_error' });
   }
 });
 
-// ===== 3) RELEASE: liberar un hold pendiente =====
+// ===== 3) RELEASE =====
 app.post('/release', async (req, res) => {
   const { reserva_id } = req.body || {};
   if (!reserva_id) return res.status(400).json({ error: 'bad_request', message: 'reserva_id requerido' });
@@ -169,17 +164,11 @@ app.post('/release', async (req, res) => {
   }
 });
 
-// ===== 4) Crear preferencia (y tomar hold si no vino antes) =====
+// ===== 4) Crear preferencia (toma hold si no hubo /hold antes) =====
 app.post('/crear-preferencia', async (req, res) => {
   const {
-    title,
-    price,
-    currency = 'ARS',
-    back_urls = {},
-    metadata = {},
-    horario_id,
-    alumno_nombre = null,
-    alumno_email  = null
+    title, price, currency = 'ARS', back_urls = {}, metadata = {},
+    horario_id, alumno_nombre, alumno_email
   } = req.body || {};
 
   if (!title || typeof title !== 'string') {
@@ -196,12 +185,13 @@ app.post('/crear-preferencia', async (req, res) => {
   }
 
   try {
-    // Si vino horario_id sin /hold previo, intentamos tomarlo ahora
-    let reservaId = null;
+    // Si vino horario_id, aseguramos el hold acá mismo (con datos del alumno)
     if (horario_id) {
+      if (!alumno_nombre || !alumno_email) {
+        return res.status(400).json({ error: 'bad_request', message: 'alumno_nombre y alumno_email requeridos cuando se envía horario_id' });
+      }
       try {
         await pool.query('BEGIN');
-
         const can = await pool.query(
           `
           SELECT 1
@@ -222,38 +212,25 @@ app.post('/crear-preferencia', async (req, res) => {
           await pool.query('ROLLBACK');
           return res.status(409).json({ error: 'not_available' });
         }
-
-        const ins = await pool.query(
+        await pool.query(
           `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
-           VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')
-           RETURNING id`,
+           VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')`,
           [horario_id, alumno_nombre, alumno_email]
         );
-        reservaId = ins.rows[0].id;
-
         await pool.query('COMMIT');
       } catch (e) {
         await pool.query('ROLLBACK');
-        if (String(e.code) === '23505') {
-          return res.status(409).json({ error: 'already_held' });
-        }
+        if (String(e.code) === '23505') return res.status(409).json({ error: 'already_held' });
         throw e;
       }
     }
 
-    // Crear preferencia en MP (con notification_url + metadata completa)
     const pref = {
       items: [{ title, quantity: 1, unit_price: price, currency_id: currency }],
       back_urls,
       auto_return: 'approved',
-      notification_url: WEBHOOK_URL || undefined, // si está seteada, MP llama al webhook
-      metadata: {
-        ...metadata,
-        reserva_id: reservaId,
-        horario_id: horario_id || null
-      }
+      metadata: { ...metadata, horario_id } // por si tu webhook lo usa
     };
-
     const mpResp = await mercadopago.preferences.create(pref);
     const data = mpResp && mpResp.body ? mpResp.body : mpResp;
 
@@ -272,46 +249,35 @@ app.post('/crear-preferencia', async (req, res) => {
   }
 });
 
-// ===== 5) Webhook de pago (marca pagado) =====
+// ===== 5) Webhook de pago =====
 app.post('/webhook', async (req, res) => {
-  try {
-    const evento = req.body || {};
-    console.log('[Webhook recibido]', JSON.stringify(evento));
+  const evento = req.body;
+  console.log('[Webhook recibido]', JSON.stringify(evento));
 
-    // Intento encontrar metadata sin importar el formato del webhook
-    const md =
-      evento?.data?.metadata ||
-      evento?.resource?.metadata ||
-      evento?.metadata ||
-      null;
+  // Ajustá esto según el payload real del Webhook de MP
+  const horario_id =
+    evento?.data?.metadata?.horario_id ||
+    evento?.data?.order?.metadata?.horario_id ||
+    evento?.metadata?.horario_id ||
+    null;
 
-    const reserva_id = md?.reserva_id ?? null;
-    const horario_id = md?.horario_id ?? null;
-
-    // Heurística de "pago aprobado" en distintos sabores de MP
-    const approvedLike =
-      (evento?.type === 'payment' && (evento?.data?.status === 'approved' || evento?.action === 'payment.created')) ||
-      (evento?.action === 'payment.updated' && evento?.data?.status === 'approved') ||
-      (evento?.topic === 'payment' && evento?.data?.id);
-
-    if (approvedLike && (reserva_id || horario_id)) {
-      const q = reserva_id
-        ? `UPDATE reservas SET estado='pagado', reservado_hasta=NULL WHERE id=$1 AND estado='pendiente'`
-        : `UPDATE reservas SET estado='pagado', reservado_hasta=NULL WHERE horario_id=$1 AND estado='pendiente'`;
-      const val = reserva_id ? [reserva_id] : [horario_id];
-      const r = await pool.query(q, val);
-      console.log('[Webhook] filas actualizadas:', r.rowCount);
+  if (evento?.type === 'payment' && horario_id) {
+    try {
+      const q = `
+        UPDATE reservas
+        SET estado = 'pagado', reservado_hasta = NULL
+        WHERE horario_id = $1 AND estado = 'pendiente'
+      `;
+      await pool.query(q, [horario_id]);
+      console.log(`[DB] Reserva confirmada para horario ${horario_id}`);
+    } catch (e) {
+      console.error('[DB error webhook]', e);
     }
-
-    res.sendStatus(200);
-  } catch (e) {
-    console.error('[webhook error]', e);
-    // responder 200 igual para que MP no reintente infinito con el mismo payload
-    res.sendStatus(200);
   }
+  res.sendStatus(200);
 });
 
-// ===== 6) Cron: liberar holds vencidos cada minuto =====
+// ===== 6) Cron: liberar holds vencidos =====
 setInterval(async () => {
   try {
     const r = await pool.query(
