@@ -1,0 +1,27 @@
+{
+  "name": "paupau-mp-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "mercadopago": "1.5.17"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/juanignaciozaffalon-ops/paupau-mp-backend.git"
+  },
+  "bugs": {
+    "url": "https://github.com/juanignaciozaffalon-ops/paupau-mp-backend/issues"
+  },
+  "homepage": "https://github.com/juanignaciozaffalon-ops/paupau-mp-backend#readme"
+}
