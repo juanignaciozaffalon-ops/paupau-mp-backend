@@ -1,4 +1,4 @@
-// server.js — Backend MP + Postgres + Admin Panel (crear profesores/horarios + liberar cupo)
+// server.js — Backend MP + Postgres + Admin Panel (crear profesores/horarios + liberar / cambio de estado)
 // SDK v1.5.x de Mercado Pago (compatible con configure)
 
 const express = require('express');
@@ -145,8 +145,8 @@ app.post('/hold', async (req, res) => {
     `;
     const { rows } = await pool.query(insQ, [
       horario_id,
-      alumno_nombre || null,
-      alumno_email || null
+      alumno_nombre || '(hold)',
+      alumno_email || '(hold)'
     ]);
 
     await pool.query('COMMIT');
@@ -219,7 +219,7 @@ app.post('/crear-preferencia', async (req, res) => {
         await pool.query(
           `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
            VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')`,
-          [horario_id, alumno_nombre || null, alumno_email || null]
+          [horario_id, alumno_nombre || '(pref)', alumno_email || '(pref)']
         );
         await pool.query('COMMIT');
       } catch (e) {
@@ -398,28 +398,53 @@ app.delete('/admin/horarios/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// NUEVO: Liberar cupo de un horario (convierte pagados/pendientes en cancelado)
+// Liberar cupo de un horario (disponible)
 app.post('/admin/horarios/:id/liberar', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!id) return res.status(400).json({ error: 'bad_request' });
   try {
-    // Cancela cualquier hold vigente
-    await pool.query(
-      `UPDATE reservas
-         SET estado='cancelado'
-       WHERE horario_id = $1
-         AND estado='pendiente'`, [id]
-    );
-    // “Libera” el bloqueo por pagos anteriores (sin borrar el registro)
-    await pool.query(
-      `UPDATE reservas
-         SET estado='cancelado'
-       WHERE horario_id = $1
-         AND estado='pagado'`, [id]
-    );
+    await pool.query(`UPDATE reservas SET estado='cancelado' WHERE horario_id=$1 AND estado IN ('pendiente','pagado')`, [id]);
     res.json({ ok: true });
   } catch (e) {
     console.error('[POST /admin/horarios/:id/liberar]', e);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+// NUEVO: Cambiar manualmente el “estado lógico” del horario
+// body: { estado: 'disponible' | 'pendiente' | 'ocupado', minutos?: number }
+app.post('/admin/horarios/:id/estado', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const estado = String(req.body?.estado || '').toLowerCase();
+  const minutos = Number(req.body?.minutos) || 1440; // por defecto 24h para "pendiente" manual
+  if (!id || !['disponible','pendiente','ocupado'].includes(estado)) {
+    return res.status(400).json({ error: 'bad_request', message: 'estado inválido' });
+  }
+  try {
+    await pool.query('BEGIN');
+
+    // limpiar estados actuales
+    await pool.query(`UPDATE reservas SET estado='cancelado' WHERE horario_id=$1 AND estado IN ('pendiente','pagado')`, [id]);
+
+    if (estado === 'pendiente') {
+      await pool.query(
+        `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
+         VALUES ($1, 'ADMIN pendiente', 'admin@panel', 'pendiente', now() + ($2 || ' minutes')::interval)`,
+        [id, minutos]
+      );
+    } else if (estado === 'ocupado') {
+      await pool.query(
+        `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
+         VALUES ($1, 'ADMIN bloqueado', 'admin@panel', 'pagado', NULL)`,
+        [id]
+      );
+    }
+
+    await pool.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) {
+    await pool.query('ROLLBACK');
+    console.error('[POST /admin/horarios/:id/estado]', e);
     res.status(500).json({ error: 'db_error' });
   }
 });
