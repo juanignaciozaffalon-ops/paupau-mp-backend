@@ -15,8 +15,7 @@ const mercadopago = require('mercadopago');
 
 const app = express();
 
-/* ----------------------------- CONFIG BÁSICA ----------------------------- */
-
+/* ----------------------------- CORS / BODY ------------------------------ */
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
@@ -30,35 +29,41 @@ const ORIGINS = [...new Set([...DEFAULT_ORIGINS, ...ALLOWED_ORIGINS])];
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);
+    if (!origin) return cb(null, true);            // curl/health/SSR
     if (ORIGINS.includes(origin)) return cb(null, true);
     return cb(new Error('Origin no permitido: ' + origin));
   },
   credentials: true
 }));
-
 app.options('*', cors());
+
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Healthcheck
-app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
-
-/* -------------------------- RUTA RAÍZ PARA CONEXIÓN ---------------------- */
-app.post('/', (req, res) => {
-  const { password } = req.body || {};
-  if (password && password === process.env.ADMIN_CODE) {
-    return res.json({ ok: true, msg: 'Conectado con código válido' });
-  }
-  res.json({ ok: true, msg: 'Backend conectado (sin validar código)' });
+/* ----------------------------- REQUEST LOGGER --------------------------- */
+app.use((req, _res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  next();
 });
 
-app.get('/', (_req, res) => {
-  res.json({ ok: true, msg: 'Backend en línea' });
+/* ------------------------------- HEALTH --------------------------------- */
+app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
+
+/* ----------------------- RUTAS DE CONEXIÓN (TODAS) ---------------------- */
+const conexionOK = (_req, res) =>
+  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
+
+[
+  '/', '/conexion', '/conectar',
+  '/api/conexion', '/api/conectar',
+  '/connect', '/api/connect',
+  '/ping'
+].forEach(pathConn => {
+  app.get(pathConn, conexionOK);
+  app.post(pathConn, conexionOK);
 });
 
 /* ---------------------------- ALMACÉN HORARIOS --------------------------- */
-
 const DATA_FILE = path.join(__dirname, 'data.json');
 
 function readData() {
@@ -87,7 +92,6 @@ function findHorario(horarios, id) {
 const ESTADOS_VALIDOS = ['pendiente', 'disponible', 'bloqueado'];
 
 /* -------------------------- ENDPOINTS DE HORARIOS ------------------------ */
-
 app.get('/api/horarios', (_req, res) => {
   const data = readData();
   res.json({ horarios: data.horarios });
@@ -166,7 +170,6 @@ app.delete('/api/horarios/:id', (req, res) => {
 });
 
 /* ------------------------- MERCADO PAGO INTEGRACIÓN ---------------------- */
-
 if (!process.env.MP_ACCESS_TOKEN) {
   console.warn('⚠️ Falta MP_ACCESS_TOKEN en variables de entorno.');
 }
