@@ -29,7 +29,7 @@ const ORIGINS = [...new Set([...DEFAULT_ORIGINS, ...ALLOWED_ORIGINS])];
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);            // curl/health/SSR
+    if (!origin) return cb(null, true);            // curl/SSR/health
     if (ORIGINS.includes(origin)) return cb(null, true);
     return cb(new Error('Origin no permitido: ' + origin));
   },
@@ -63,8 +63,8 @@ function readData() {
   try {
     const raw = fs.readFileSync(DATA_FILE, 'utf8');
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.horarios)) parsed.horarios = [];
     if (!Array.isArray(parsed.profesores)) parsed.profesores = [];
+    if (!Array.isArray(parsed.horarios)) parsed.horarios = [];
     return parsed;
   } catch {
     return { profesores: [], horarios: [] };
@@ -85,35 +85,92 @@ function findHorario(horarios, id) {
 
 const ESTADOS_VALIDOS = ['pendiente', 'disponible', 'bloqueado'];
 
-/* -------------------------- ENDPOINTS DE PROFESORES --------------------- */
-// (Tu UI los pide como /admin/profesores – devolvemos estructura simple)
+/* -------------------------- ENDPOINTS /admin/* (UI) --------------------- */
+/* Devuelven SIEMPRE { rows: [...] } como espera tu panel */
 
+// PROFESORES
 app.get('/admin/profesores', (_req, res) => {
   const data = readData();
-  res.json({ ok: true, profesores: data.profesores });
+  res.json({ rows: data.profesores });
 });
 
 app.post('/admin/profesores', (req, res) => {
   const { nombre = '' } = req.body || {};
   const data = readData();
   const id = Date.now().toString();
-  const profe = { id, nombre };
-  data.profesores.push(profe);
+  const profesor = { id, nombre };
+  data.profesores.push(profesor);
   writeData(data);
-  res.json({ ok: true, profesor: profe });
+  res.json({ rows: data.profesores });
 });
 
 app.delete('/admin/profesores/:id', (req, res) => {
   const { id } = req.params;
   const data = readData();
-  const before = data.profesores.length;
   data.profesores = data.profesores.filter(p => String(p.id) !== String(id));
   writeData(data);
-  res.json({ ok: true, deleted: before - data.profesores.length });
+  res.json({ rows: data.profesores });
 });
 
-/* -------------------------- ENDPOINTS DE HORARIOS ------------------------ */
-// API “oficial”
+// HORARIOS
+app.get('/admin/horarios', (_req, res) => {
+  const data = readData();
+  res.json({ rows: data.horarios });
+});
+
+app.post('/admin/horarios', (req, res) => {
+  const { dia = 'Lunes', hora = '15:00', estado = 'disponible', profesorId = null } = req.body || {};
+  const data = readData();
+  const id = Date.now().toString();
+  const nuevo = { id, dia, hora, estado, profesorId };
+  data.horarios.push(nuevo);
+  writeData(data);
+  res.json({ rows: data.horarios });
+});
+
+app.put('/admin/horarios/:id/estado', (req, res) => {
+  const { id } = req.params;
+  const { estado } = req.body || {};
+  const data = readData();
+  const h = findHorario(data.horarios, id);
+  if (h && ESTADOS_VALIDOS.includes(estado)) {
+    h.estado = estado;
+    writeData(data);
+  }
+  res.json({ rows: data.horarios });
+});
+
+app.post('/admin/horarios/:id/accion', (req, res) => {
+  const { id } = req.params;
+  const { accion } = req.body || {};
+  const map = {
+    bloquear: 'bloqueado',
+    bloqueado: 'bloqueado',
+    liberar: 'disponible',
+    disponible: 'disponible',
+    pendiente: 'pendiente'
+  };
+  const estado = map[String(accion || '').toLowerCase()];
+  const data = readData();
+  const h = findHorario(data.horarios, id);
+  if (h && ESTADOS_VALIDOS.includes(estado)) {
+    h.estado = estado;
+    writeData(data);
+  }
+  res.json({ rows: data.horarios });
+});
+
+app.delete('/admin/horarios/:id', (req, res) => {
+  const { id } = req.params;
+  const data = readData();
+  data.horarios = data.horarios.filter(h => String(h.id) !== String(id));
+  writeData(data);
+  res.json({ rows: data.horarios });
+});
+
+/* -------------------------- ENDPOINTS /api/* (interno) ------------------ */
+// (Se mantienen por compatibilidad)
+
 app.get('/api/horarios', (_req, res) => {
   const data = readData();
   res.json({ horarios: data.horarios });
@@ -189,30 +246,6 @@ app.delete('/api/horarios/:id', (req, res) => {
   data.horarios = data.horarios.filter(h => String(h.id) !== String(id));
   writeData(data);
   res.json({ ok: true, deleted: before - data.horarios.length });
-});
-
-/* ----------------------- ALIAS /admin -> /api (para tu UI) -------------- */
-// Tu panel usa rutas /admin/...; las mapeamos a la API existente:
-
-app.get('/admin/horarios', (req, res) => {
-  req.url = '/api/horarios';
-  app._router.handle(req, res, () => {});
-});
-app.post('/admin/horarios', (req, res) => {
-  req.url = '/api/horarios';
-  app._router.handle(req, res, () => {});
-});
-app.put('/admin/horarios/:id/estado', (req, res) => {
-  req.url = `/api/horarios/${req.params.id}/estado`;
-  app._router.handle(req, res, () => {});
-});
-app.post('/admin/horarios/:id/accion', (req, res) => {
-  req.url = `/api/horarios/${req.params.id}/accion`;
-  app._router.handle(req, res, () => {});
-});
-app.delete('/admin/horarios/:id', (req, res) => {
-  req.url = `/api/horarios/${req.params.id}`;
-  app._router.handle(req, res, () => {});
 });
 
 /* ------------------------- MERCADO PAGO INTEGRACIÓN ---------------------- */
