@@ -1,4 +1,4 @@
-// server.js — Backend MP + Postgres + Admin Panel (crear profesores/horarios)
+// server.js — Backend MP + Postgres + Admin Panel
 // SDK v1.5.x de Mercado Pago (compatible con configure)
 
 const express = require('express');
@@ -11,10 +11,10 @@ const app = express();
 /* ===== Env =====
 Variables necesarias en Render:
 - MP_ACCESS_TOKEN
-- ALLOWED_ORIGIN             (coma-separadas, ej: https://www.paupaulanguages.com,https://odoo.com)
-- DATABASE_URL               (la URL de Postgres de Render)
-- ADMIN_KEY                  (clave simple para el panel admin)
-- WEBHOOK_URL (opcional)
+- ALLOWED_ORIGIN   (coma-separadas, ej: https://www.paupaulanguages.com,https://odoo.com)
+- DATABASE_URL
+- ADMIN_KEY        (clave simple para el panel admin)
+- WEBHOOK_URL      (opcional)
 */
 const PORT       = process.env.PORT || 10000;
 const MP_TOKEN   = process.env.MP_ACCESS_TOKEN;
@@ -22,7 +22,7 @@ const ALLOWED    = (process.env.ALLOWED_ORIGIN || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 const ADMIN_KEY  = process.env.ADMIN_KEY || 'cambia-esta-clave';
 
-// ===== CORS mínimo (para el sitio público y el admin) =====
+// ===== CORS mínimo =====
 app.use((req, res, next) => {
   const reqOrigin = req.headers.origin || '';
   const ok = ALLOWED.includes(reqOrigin);
@@ -59,7 +59,7 @@ try {
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 /* ============================================================
-   Helpers SQL de estado de reservas (sin vista materializada)
+   Helpers SQL de estado de reservas
 ============================================================ */
 const STATE_CASE = `
   CASE
@@ -112,11 +112,16 @@ app.get('/horarios', async (_req, res) => {
 
 // Hold por 10 minutos
 app.post('/hold', async (req, res) => {
-  const { horario_id, alumno_nombre, alumno_email } = req.body || {};
+  let { horario_id, alumno_nombre, alumno_email } = req.body || {};
   if (!horario_id) return res.status(400).json({ error: 'bad_request', message: 'horario_id requerido' });
+
+  // 👇 Defaults para cumplir NOT NULL en tu tabla
+  alumno_nombre = (alumno_nombre || '').trim() || 'Web';
+  alumno_email  = (alumno_email  || '').trim() || 'sin-email@paupaulanguages';
 
   try {
     await pool.query('BEGIN');
+
     const canQ = `
       SELECT 1
       FROM horarios h
@@ -141,7 +146,7 @@ app.post('/hold', async (req, res) => {
       VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')
       RETURNING id, reservado_hasta
     `;
-    const { rows } = await pool.query(insQ, [horario_id, alumno_nombre || null, alumno_email || null]);
+    const { rows } = await pool.query(insQ, [horario_id, alumno_nombre, alumno_email]);
 
     await pool.query('COMMIT');
     return res.json({ id: rows[0].id, reservado_hasta: rows[0].reservado_hasta });
@@ -173,11 +178,17 @@ app.post('/release', async (req, res) => {
 
 // Crear preferencia (y auto-hold si vino horario_id)
 app.post('/crear-preferencia', async (req, res) => {
-  const { title, price, currency = 'ARS', back_urls = {}, metadata = {}, horario_id } = req.body || {};
+  let { title, price, currency = 'ARS', back_urls = {}, metadata = {}, horario_id,
+        alumno_nombre, alumno_email } = req.body || {};
+
   if (!title || typeof title !== 'string') return res.status(400).json({ error: 'bad_request', message: 'title requerido' });
   if (typeof price !== 'number' || !(price > 0)) return res.status(400).json({ error: 'bad_request', message: 'price debe ser número > 0' });
   if (!/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: 'bad_request', message: 'currency inválida' });
   if (!MP_TOKEN) return res.status(500).json({ error: 'server_config', message: 'MP_ACCESS_TOKEN no configurado' });
+
+  // 👇 Defaults para cumplir NOT NULL
+  alumno_nombre = (alumno_nombre || '').trim() || 'Web';
+  alumno_email  = (alumno_email  || '').trim() || 'sin-email@paupaulanguages';
 
   try {
     if (horario_id) {
@@ -201,9 +212,9 @@ app.post('/crear-preferencia', async (req, res) => {
         );
         if (can.rowCount === 0) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
         await pool.query(
-          `INSERT INTO reservas (horario_id, estado, reservado_hasta)
-           VALUES ($1, 'pendiente', now() + interval '10 minutes')`,
-          [horario_id]
+          `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
+           VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')`,
+          [horario_id, alumno_nombre, alumno_email]
         );
         await pool.query('COMMIT');
       } catch (e) {
@@ -238,7 +249,9 @@ app.post('/webhook', async (req, res) => {
   const evento = req.body;
   console.log('[Webhook recibido]', JSON.stringify(evento));
 
-  const horario_id = evento?.data?.metadata?.horario_id; // ajustar si tu webhook manda otro shape
+  // Ajustar al shape real si fuese necesario:
+  const horario_id = evento?.data?.metadata?.horario_id;
+
   if (evento?.type === 'payment') {
     try {
       if (horario_id) {
@@ -283,8 +296,6 @@ function requireAdmin(req, res, next) {
 }
 
 // ---- Profesores ----
-
-// Listar profesores
 app.get('/admin/profesores', requireAdmin, async (_req, res) => {
   try {
     const { rows } = await pool.query(`SELECT id, nombre FROM profesores ORDER BY nombre`);
@@ -295,7 +306,6 @@ app.get('/admin/profesores', requireAdmin, async (_req, res) => {
   }
 });
 
-// Crear profesor
 app.post('/admin/profesores', requireAdmin, async (req, res) => {
   const { nombre } = req.body || {};
   if (!nombre || !String(nombre).trim()) return res.status(400).json({ error: 'bad_request', message: 'nombre requerido' });
@@ -311,7 +321,6 @@ app.post('/admin/profesores', requireAdmin, async (req, res) => {
   }
 });
 
-// Borrar profesor (solo si no tiene horarios)
 app.delete('/admin/profesores/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!id) return res.status(400).json({ error: 'bad_request' });
@@ -327,8 +336,6 @@ app.delete('/admin/profesores/:id', requireAdmin, async (req, res) => {
 });
 
 // ---- Horarios ----
-
-// Listar horarios (opcional por profesor_id)
 app.get('/admin/horarios', requireAdmin, async (req, res) => {
   const profesor_id = Number(req.query.profesor_id) || null;
   try {
@@ -351,7 +358,6 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
   }
 });
 
-// Crear horario
 app.post('/admin/horarios', requireAdmin, async (req, res) => {
   const { profesor_id, dia_semana, hora } = req.body || {};
   if (!profesor_id || !dia_semana || !hora) {
@@ -370,12 +376,10 @@ app.post('/admin/horarios', requireAdmin, async (req, res) => {
   }
 });
 
-// Eliminar horario (si no está pagado)
 app.delete('/admin/horarios/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!id) return res.status(400).json({ error: 'bad_request' });
   try {
-    // No permitir borrar si existe una reserva pagada
     const paid = await pool.query(
       `SELECT 1 FROM reservas WHERE horario_id = $1 AND estado = 'pagado' LIMIT 1`,
       [id]
