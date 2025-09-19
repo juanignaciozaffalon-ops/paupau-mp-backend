@@ -1,10 +1,8 @@
 // server.js
 // Node 18+ – MP SDK v1.5.17
 
-// Hacer opcional dotenv (para que no rompa si no está instalado)
-try {
-  require('dotenv').config();
-} catch (_) {
+// dotenv opcional
+try { require('dotenv').config(); } catch (_) {
   console.log('dotenv no instalado; se usan variables de entorno del sistema.');
 }
 
@@ -21,9 +19,7 @@ const app = express();
 
 // CORS (3 dominios por defecto + los de ALLOWED_ORIGINS si existen)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 const DEFAULT_ORIGINS = [
   'https://paupaulanguages.com',
@@ -34,20 +30,39 @@ const DEFAULT_ORIGINS = [
 const ORIGINS = [...new Set([...DEFAULT_ORIGINS, ...ALLOWED_ORIGINS])];
 
 app.use(cors({
-  origin: function (origin, cb) {
-    // permitir requests sin origin (SSR, curl, healthchecks)
-    if (!origin) return cb(null, true);
+  origin(origin, cb) {
+    if (!origin) return cb(null, true);           // SSR/cron/health
     if (ORIGINS.includes(origin)) return cb(null, true);
     return cb(new Error('Origin no permitido: ' + origin));
   },
   credentials: true
 }));
 
+// Soporte preflight por si el front usa fetch con custom headers
+app.options('*', cors());
+
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // Healthcheck
 app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
+
+/* -------------------------- RUTA DE CONEXIÓN (NUEVA) -------------------- */
+// Si tu UI llama a /conexion (GET o POST), responde OK
+app.get('/conexion', (_req, res) => {
+  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
+});
+app.post('/conexion', (_req, res) => {
+  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
+});
+
+// Alias por si el front usa /api/conexion
+app.get('/api/conexion', (_req, res) => {
+  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
+});
+app.post('/api/conexion', (_req, res) => {
+  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
+});
 
 /* ---------------------------- ALMACÉN HORARIOS --------------------------- */
 
