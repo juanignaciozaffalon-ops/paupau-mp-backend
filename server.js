@@ -17,7 +17,6 @@ const app = express();
 
 /* ----------------------------- CONFIG BÁSICA ----------------------------- */
 
-// CORS (3 dominios por defecto + los de ALLOWED_ORIGINS si existen)
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 
@@ -31,37 +30,31 @@ const ORIGINS = [...new Set([...DEFAULT_ORIGINS, ...ALLOWED_ORIGINS])];
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);           // SSR/cron/health
+    if (!origin) return cb(null, true);
     if (ORIGINS.includes(origin)) return cb(null, true);
     return cb(new Error('Origin no permitido: ' + origin));
   },
   credentials: true
 }));
 
-// Soporte preflight por si el front usa fetch con custom headers
 app.options('*', cors());
-
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // Healthcheck
 app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
-/* -------------------------- RUTA DE CONEXIÓN (NUEVA) -------------------- */
-// Si tu UI llama a /conexion (GET o POST), responde OK
-app.get('/conexion', (_req, res) => {
-  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
-});
-app.post('/conexion', (_req, res) => {
-  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
+/* -------------------------- RUTA RAÍZ PARA CONEXIÓN ---------------------- */
+app.post('/', (req, res) => {
+  const { password } = req.body || {};
+  if (password && password === process.env.ADMIN_CODE) {
+    return res.json({ ok: true, msg: 'Conectado con código válido' });
+  }
+  res.json({ ok: true, msg: 'Backend conectado (sin validar código)' });
 });
 
-// Alias por si el front usa /api/conexion
-app.get('/api/conexion', (_req, res) => {
-  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
-});
-app.post('/api/conexion', (_req, res) => {
-  res.json({ ok: true, msg: 'Backend conectado', version: '1.0.0' });
+app.get('/', (_req, res) => {
+  res.json({ ok: true, msg: 'Backend en línea' });
 });
 
 /* ---------------------------- ALMACÉN HORARIOS --------------------------- */
@@ -222,7 +215,6 @@ app.post('/api/mp/webhook', async (req, res) => {
     const { type, data } = req.body || {};
     if (type !== 'payment' || !data?.id) return;
 
-    // Si en metadata venía horarioId, lo bloqueamos
     const meta = req.body?.metadata || null;
     const horarioId = meta?.horarioId;
     if (!horarioId) return;
