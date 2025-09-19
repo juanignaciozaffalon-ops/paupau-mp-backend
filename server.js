@@ -9,12 +9,11 @@ const { Pool } = require('pg');
 const app = express();
 
 /* ===== Env =====
-Variables necesarias en Render:
 - MP_ACCESS_TOKEN
-- ALLOWED_ORIGIN   (coma-separadas, ej: https://www.paupaulanguages.com,https://odoo.com)
+- ALLOWED_ORIGIN   (ej: https://www.paupaulanguages.com,https://odoo.com)
 - DATABASE_URL
-- ADMIN_KEY        (clave simple para el panel admin)
-- WEBHOOK_URL      (opcional)
+- ADMIN_KEY
+- WEBHOOK_URL (opcional)
 */
 const PORT       = process.env.PORT || 10000;
 const MP_TOKEN   = process.env.MP_ACCESS_TOKEN;
@@ -22,7 +21,6 @@ const ALLOWED    = (process.env.ALLOWED_ORIGIN || '')
   .split(',').map(s => s.trim()).filter(Boolean);
 const ADMIN_KEY  = process.env.ADMIN_KEY || 'cambia-esta-clave';
 
-// ===== CORS mínimo =====
 app.use((req, res, next) => {
   const reqOrigin = req.headers.origin || '';
   const ok = ALLOWED.includes(reqOrigin);
@@ -47,7 +45,7 @@ pool.connect()
   .then(() => console.log('[DB] Conectado a Postgres ✅'))
   .catch(err => console.error('[DB] Error de conexión ❌', err));
 
-// ===== MP SDK v1.x =====
+// ===== MP SDK =====
 try {
   mercadopago.configure({ access_token: MP_TOKEN });
   console.log('[boot] Mercado Pago SDK configurado (v1.x)');
@@ -58,9 +56,7 @@ try {
 // ===== Health =====
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-/* ============================================================
-   Helpers SQL de estado de reservas
-============================================================ */
+/* ----------------------- Helpers de estado ----------------------- */
 const STATE_CASE = `
   CASE
     WHEN EXISTS (
@@ -83,11 +79,9 @@ const DAY_ORDER = `array_position(
   ARRAY['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo']::text[], h.dia_semana
 )`;
 
-/* ============================================================
-   PÚBLICO
-============================================================ */
+/* ============================== PÚBLICO ============================== */
 
-// Listar horarios con estado (para el formulario)
+// Listar horarios con estado
 app.get('/horarios', async (_req, res) => {
   try {
     const q = `
@@ -110,51 +104,47 @@ app.get('/horarios', async (_req, res) => {
   }
 });
 
-// Hold por 10 minutos
+// Hold 10 minutos
 app.post('/hold', async (req, res) => {
   let { horario_id, alumno_nombre, alumno_email } = req.body || {};
   if (!horario_id) return res.status(400).json({ error: 'bad_request', message: 'horario_id requerido' });
 
-  // 👇 Defaults para cumplir NOT NULL en tu tabla
   alumno_nombre = (alumno_nombre || '').trim() || 'Web';
   alumno_email  = (alumno_email  || '').trim() || 'sin-email@paupaulanguages';
 
   try {
     await pool.query('BEGIN');
 
-    const canQ = `
-      SELECT 1
-      FROM horarios h
-      WHERE h.id = $1
-        AND NOT EXISTS (
-          SELECT 1 FROM reservas r
-          WHERE r.horario_id = h.id
-            AND (
-              r.estado = 'pagado' OR
-              (r.estado = 'pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta > now())
-            )
-        )
-    `;
-    const can = await pool.query(canQ, [horario_id]);
-    if (can.rowCount === 0) {
-      await pool.query('ROLLBACK');
-      return res.status(409).json({ error: 'not_available' });
-    }
+    const can = await pool.query(
+      `SELECT 1
+       FROM horarios h
+       WHERE h.id = $1
+         AND NOT EXISTS (
+           SELECT 1 FROM reservas r
+           WHERE r.horario_id = h.id
+             AND (
+               r.estado = 'pagado' OR
+               (r.estado = 'pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta > now())
+             )
+         )`,
+      [horario_id]
+    );
+    if (can.rowCount === 0) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
 
-    const insQ = `
-      INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
-      VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')
-      RETURNING id, reservado_hasta
-    `;
-    const { rows } = await pool.query(insQ, [horario_id, alumno_nombre, alumno_email]);
+    const ins = await pool.query(
+      `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
+       VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')
+       RETURNING id, reservado_hasta`,
+      [horario_id, alumno_nombre, alumno_email]
+    );
 
     await pool.query('COMMIT');
-    return res.json({ id: rows[0].id, reservado_hasta: rows[0].reservado_hasta });
+    res.json({ id: ins.rows[0].id, reservado_hasta: ins.rows[0].reservado_hasta });
   } catch (e) {
     await pool.query('ROLLBACK');
     if (String(e.code) === '23505') return res.status(409).json({ error: 'already_held' });
     console.error('[POST /hold]', e);
-    return res.status(500).json({ error: 'db_error' });
+    res.status(500).json({ error: 'db_error' });
   }
 });
 
@@ -163,11 +153,11 @@ app.post('/release', async (req, res) => {
   const { reserva_id } = req.body || {};
   if (!reserva_id) return res.status(400).json({ error: 'bad_request', message: 'reserva_id requerido' });
   try {
-    const q = `UPDATE reservas
-               SET estado = 'cancelado'
-               WHERE id = $1 AND estado = 'pendiente'
-               RETURNING id`;
-    const r = await pool.query(q, [reserva_id]);
+    const r = await pool.query(
+      `UPDATE reservas SET estado = 'cancelado'
+       WHERE id = $1 AND estado = 'pendiente' RETURNING id`,
+      [reserva_id]
+    );
     if (r.rowCount === 0) return res.status(404).json({ error: 'not_found_or_not_pending' });
     res.json({ ok: true });
   } catch (e) {
@@ -176,7 +166,7 @@ app.post('/release', async (req, res) => {
   }
 });
 
-// Crear preferencia (y auto-hold si vino horario_id)
+// Crear preferencia (con auto-hold opcional)
 app.post('/crear-preferencia', async (req, res) => {
   let { title, price, currency = 'ARS', back_urls = {}, metadata = {}, horario_id,
         alumno_nombre, alumno_email } = req.body || {};
@@ -186,7 +176,6 @@ app.post('/crear-preferencia', async (req, res) => {
   if (!/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: 'bad_request', message: 'currency inválida' });
   if (!MP_TOKEN) return res.status(500).json({ error: 'server_config', message: 'MP_ACCESS_TOKEN no configurado' });
 
-  // 👇 Defaults para cumplir NOT NULL
   alumno_nombre = (alumno_nombre || '').trim() || 'Web';
   alumno_email  = (alumno_email  || '').trim() || 'sin-email@paupaulanguages';
 
@@ -195,22 +184,21 @@ app.post('/crear-preferencia', async (req, res) => {
       try {
         await pool.query('BEGIN');
         const can = await pool.query(
-          `
-          SELECT 1
-          FROM horarios h
-          WHERE h.id = $1
-            AND NOT EXISTS (
-              SELECT 1 FROM reservas r
-              WHERE r.horario_id = h.id
-                AND (
-                  r.estado = 'pagado' OR
-                  (r.estado = 'pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta > now())
-                )
-            )
-          `,
+          `SELECT 1
+           FROM horarios h
+           WHERE h.id = $1
+             AND NOT EXISTS (
+               SELECT 1 FROM reservas r
+               WHERE r.horario_id = h.id
+                 AND (
+                   r.estado = 'pagado' OR
+                   (r.estado = 'pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta > now())
+                 )
+             )`,
           [horario_id]
         );
         if (can.rowCount === 0) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
+
         await pool.query(
           `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
            VALUES ($1, $2, $3, 'pendiente', now() + interval '10 minutes')`,
@@ -233,36 +221,28 @@ app.post('/crear-preferencia', async (req, res) => {
     const mpResp = await mercadopago.preferences.create(pref);
     const data = mpResp?.body || mpResp;
 
-    return res.json({
-      id: data.id,
-      init_point: data.init_point,
-      sandbox_init_point: data.sandbox_init_point
-    });
+    res.json({ id: data.id, init_point: data.init_point, sandbox_init_point: data.sandbox_init_point });
   } catch (e) {
     console.error('[MP error]', e?.message, '\n[MP error data]', e?.response?.body);
-    return res.status(502).json({ error: 'mp_failed', message: e?.message || 'unknown', details: e?.response?.body || null });
+    res.status(502).json({ error: 'mp_failed', message: e?.message || 'unknown', details: e?.response?.body || null });
   }
 });
 
-// Webhook (marca pagado)
+// Webhook: marcar pagado
 app.post('/webhook', async (req, res) => {
   const evento = req.body;
   console.log('[Webhook recibido]', JSON.stringify(evento));
 
-  // Ajustar al shape real si fuese necesario:
-  const horario_id = evento?.data?.metadata?.horario_id;
-
-  if (evento?.type === 'payment') {
+  const horario_id = evento?.data?.metadata?.horario_id; // ajustar si tu webhook manda otro shape
+  if (evento?.type === 'payment' && horario_id) {
     try {
-      if (horario_id) {
-        const q = `
-          UPDATE reservas
-          SET estado = 'pagado', reservado_hasta = NULL
-          WHERE horario_id = $1 AND estado = 'pendiente'
-        `;
-        await pool.query(q, [horario_id]);
-        console.log(`[DB] Reserva confirmada para horario ${horario_id}`);
-      }
+      await pool.query(
+        `UPDATE reservas
+         SET estado = 'pagado', reservado_hasta = NULL
+         WHERE horario_id = $1 AND estado = 'pendiente'`,
+        [horario_id]
+      );
+      console.log(`[DB] Reserva confirmada para horario ${horario_id}`);
     } catch (e) {
       console.error('[DB error webhook]', e);
     }
@@ -286,9 +266,7 @@ setInterval(async () => {
   }
 }, 60 * 1000);
 
-/* ============================================================
-   ADMIN (protegido con X-Admin-Key)
-============================================================ */
+/* ============================== ADMIN ============================== */
 function requireAdmin(req, res, next) {
   const key = req.headers['x-admin-key'] || req.query.key;
   if (!key || key !== ADMIN_KEY) return res.status(401).json({ error: 'unauthorized' });
@@ -317,7 +295,7 @@ app.post('/admin/profesores', requireAdmin, async (req, res) => {
     res.json(rows[0]);
   } catch (e) {
     console.error('[POST /admin/profesores]', e);
-    return res.status(500).json({ error: 'db_error' });
+    res.status(500).json({ error: 'db_error' });
   }
 });
 
@@ -394,10 +372,56 @@ app.delete('/admin/horarios/:id', requireAdmin, async (req, res) => {
   }
 });
 
+/* ---- NUEVO: cambiar estado manual (Disponible/Bloqueado) ----
+   disponible: elimina pendientes activos (si hay pagado, no se puede)
+   bloqueado: crea una reserva 'pendiente' con reservado_hasta muy largo
+*/
+app.patch('/admin/horarios/:id/estado', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const { estado } = req.body || {};
+  if (!id || !['disponible','bloqueado'].includes(estado)) {
+    return res.status(400).json({ error: 'bad_request', message: 'estado debe ser disponible|bloqueado' });
+  }
+  try {
+    // si hay pago, no permitir cambios
+    const paid = await pool.query(
+      `SELECT 1 FROM reservas WHERE horario_id = $1 AND estado = 'pagado' LIMIT 1`, [id]
+    );
+    if (paid.rowCount) return res.status(409).json({ error: 'paid', message: 'El turno ya está pagado' });
+
+    await pool.query('BEGIN');
+
+    // limpiar pendientes actuales
+    await pool.query(
+      `UPDATE reservas
+         SET estado = 'cancelado'
+       WHERE horario_id = $1
+         AND estado = 'pendiente'
+         AND reservado_hasta IS NOT NULL
+         AND reservado_hasta > now()`,
+      [id]
+    );
+
+    if (estado === 'bloqueado') {
+      // bloquear indefinidamente con un pendiente "administrativo"
+      await pool.query(
+        `INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta)
+         VALUES ($1, 'Bloqueo admin', 'admin@paupaulanguages', 'pendiente', now() + interval '100 years')`,
+        [id]
+      );
+    }
+    await pool.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) {
+    await pool.query('ROLLBACK');
+    console.error('[PATCH /admin/horarios/:id/estado]', e);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
 // ===== 404 =====
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 
-// ===== Start =====
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
 });
