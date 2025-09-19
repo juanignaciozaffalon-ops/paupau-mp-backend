@@ -5,6 +5,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const mercadopago = require('mercadopago');
 const { Pool } = require('pg');
+const nodemailer = require('nodemailer'); // 👈 agregado para email
 
 const app = express();
 
@@ -15,6 +16,14 @@ Variables en Render:
 - DATABASE_URL
 - ADMIN_KEY
 - (opcional) WEBHOOK_URL
+
+// 👇 PARA EMAIL (agregar en Render → Settings → Environment)
+- SMTP_HOST           (ej: smtp.gmail.com)
+- SMTP_PORT           (ej: 465)
+- SMTP_USER           (ej: paupaulanguagesadmi@gmail.com)
+- SMTP_PASS           (App Password de Gmail, 16 caracteres)
+- FROM_EMAIL          (ej: el mismo Gmail)
+- ACADEMY_EMAIL       (ej: el mismo Gmail)
 */
 const PORT       = process.env.PORT || 10000;
 const MP_TOKEN   = process.env.MP_ACCESS_TOKEN;
@@ -53,6 +62,29 @@ try {
   console.log('[boot] Mercado Pago SDK configurado (v1.x)');
 } catch (e) {
   console.error('[boot] Error configurando MP SDK:', e.message);
+}
+
+// ===== Mailer (Nodemailer) =====
+const SMTP_HOST     = process.env.SMTP_HOST || '';
+const SMTP_PORT     = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER     = process.env.SMTP_USER || '';
+const SMTP_PASS     = process.env.SMTP_PASS || '';
+const FROM_EMAIL    = process.env.FROM_EMAIL || SMTP_USER || 'no-reply@paupau.local';
+const ACADEMY_EMAIL = process.env.ACADEMY_EMAIL || FROM_EMAIL;
+
+let transporter = null;
+if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+  transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465, // true si 465 (SSL)
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
+  });
+  transporter.verify()
+    .then(() => console.log('[mail] Transporte SMTP listo ✅'))
+    .catch(err => console.error('[mail] Error SMTP ❌', err?.message));
+} else {
+  console.warn('[mail] Variables SMTP incompletas. Configurá SMTP_HOST/PORT/USER/PASS/FROM_EMAIL/ACADEMY_EMAIL en Render.');
 }
 
 // ===== Health =====
@@ -315,6 +347,27 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// === Ruta de PRUEBA de correo (solo para comprobar SMTP) ===
+app.post('/debug/send-test-email', requireAdmin, async (req, res) => {
+  try {
+    if (!transporter) {
+      return res.status(500).json({ error: 'smtp_not_configured' });
+    }
+    const { alumnoEmail, profesorEmail } = req.body || {};
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: alumnoEmail || ACADEMY_EMAIL,
+      cc: profesorEmail || undefined,
+      subject: 'Prueba de correo - PauPau Languages',
+      html: '<p>Esto es un test OK 👍</p>'
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[debug/send-test-email]', e);
+    res.status(500).json({ error: 'send_fail', message: e?.message });
+  }
+});
+
 // ---- Profesores ----
 app.get('/admin/profesores', requireAdmin, async (_req, res) => {
   try {
@@ -407,7 +460,7 @@ app.delete('/admin/horarios/:id', requireAdmin, async (req, res) => {
     );
     if (paid.rowCount) return res.status(409).json({ error: 'paid', message: 'No puede eliminarse: ya está pagado' });
 
-    await pool.query(`DELETE FROM horarios WHERE id = $1`, [id]);
+    await pool.query(`DELETE FROM horarios WHERE id = $1`);
     res.json({ ok: true });
   } catch (e) {
     console.error('[DELETE /admin/horarios/:id]', e);
