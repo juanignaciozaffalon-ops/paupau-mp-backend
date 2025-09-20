@@ -336,24 +336,101 @@ app.post('/webhook', async (req, res) => {
       const profEmail    = PROF_EMAILS[profesorName] || '';
 
       // Email alumno — versión robusta (no se corta)
-      const alumnoHtml = `
-        <div>
-          <p>Hola ${alumnoNombre}!</p>
-          <p>¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
-          <p>En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.</p>
-          <p><strong>Tu docente:</strong> ${profesorName}.<br>
-          <strong>Tus horarios:</strong> ${horariosTxt} (hora Argentina).</p>
-          <p>Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.</p>
-          <p>Más cerca de la fecha de inicio tu docente te enviará los links de acceso.</p>
-          <p><strong>Profesor/tutor:</strong> ${profesorName}<br>
-          <strong>Correo del profesor:</strong> ${profEmail || '(lo recibirás pronto)'}</p>
-          <p><strong>Aranceles:</strong> Se abonan del 1 al 7 de cada mes por transferencia bancaria. En caso de no abonar en tiempo y forma, las clases se suspenderán.</p>
-          <p>Esperamos que tu experiencia sea increíble. Si surgen dudas, escribime a mí o a tu profesor/a.</p>
-          <p>¡Que tengas una excelente experiencia!<br>
-          Ana Paula Toledo Del Grosso, Founder of PauPau Languages.</p>
-          <p>Instagram: <strong>@paupaulanguages</strong></p>
-        </div>
-      `;
+      const alumnoHtml = `<!doctype html>
+<html lang="es" style="margin:0;padding:0;">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width"/>
+  <title>Bienvenida PauPau Languages</title>
+  <style>
+    /* Fallbacks por si el cliente respeta <style> (la mayoría usa inline) */
+    @media (max-width:600px){
+      .container{width:100% !important; margin:0 !important; border-radius:0 !important;}
+      .inner{padding:20px !important;}
+    }
+  </style>
+</head>
+<body style="margin:0; padding:0; background:#f6f7fb; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;">
+  <center style="width:100%; background:#f6f7fb; padding:24px 12px;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px; margin:0 auto;" class="container">
+      <tr>
+        <td style="padding:0;">
+          <!-- Card -->
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
+                 style="background:#ffffff; border-radius:16px; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.08);">
+            <!-- Header bar -->
+            <tr>
+              <td style="background:#3954A5; height:6px; font-size:0; line-height:0;">&nbsp;</td>
+            </tr>
+
+            <!-- Content -->
+            <tr>
+              <td class="inner" style="padding:28px 28px 10px 28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; color:#222;">
+                <h1 style="margin:0 0 14px; font-size:22px; line-height:1.35; color:#1a1f36;">
+                  ¡Hola ${alumnoNombre}!
+                </h1>
+
+                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">
+                  ¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.
+                </p>
+                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">
+                  En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.
+                </p>
+
+                <!-- Info list -->
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
+                       style="background:#f7f8ff; border:1px solid #e4e7ff; border-radius:12px; padding:14px; margin:6px 0 16px;">
+                  <tr>
+                    <td style="font-size:14px; line-height:1.6; color:#1d2340;">
+                      <div style="margin:0 0 8px;"><strong>Tu docente:</strong> ${profesorName}</div>
+                      <div style="margin:0 0 8px;"><strong>Tus horarios:</strong> ${horariosTxt} <span style="color:#5b64a5;">(hora Argentina)</span></div>
+                      <div style="margin:0 0 8px;"><strong>Profesor/tutor:</strong> ${profesorName}</div>
+                      <div style="margin:0;"><strong>Correo del profesor:</strong> ${profEmail || '(lo recibirás pronto)'}</div>
+                    </td>
+                  </tr>
+                </table>
+
+                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">
+                  Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.
+                </p>
+                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">
+                  Más cerca de la fecha de inicio tu docente te enviará los links de acceso.
+                </p>
+
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
+                       style="background:#fff8ee; border:1px solid #ffe2b9; border-radius:12px; padding:14px; margin:0 0 18px;">
+                  <tr>
+                    <td style="font-size:14px; line-height:1.6; color:#8a4a00;">
+                      <strong>Aranceles:</strong> Se abonan del 1 al 7 de cada mes por transferencia bancaria. 
+                      En caso de no abonar en tiempo y forma, las clases se suspenderán.
+                    </td>
+                  </tr>
+                </table>
+
+                <p style="margin:0 0 4px; font-size:14px; line-height:1.6; color:#4b4f66;">
+                  Si surge cualquier duda, escribinos cuando quieras.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding:18px 28px 26px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
+                <div style="font-size:13px; color:#707797; line-height:1.6;">
+                  <div style="margin:0 0 4px;"><strong style="color:#3954A5;">PauPau Languages</strong></div>
+                  <div>Instagram: <strong>@paupaulanguages</strong></div>
+                </div>
+              </td>
+            </tr>
+
+          </table>
+          <!-- /Card -->
+        </td>
+      </tr>
+    </table>
+  </center>
+</body>
+</html>`;
 
       /* ========== FORMULARIO PARA ACADEMIA/PROFE (incluye extra_info) ========== */
       let formJson = {};
