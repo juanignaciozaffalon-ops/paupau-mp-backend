@@ -360,31 +360,74 @@ app.post('/webhook', async (req, res) => {
         <p>Instagram: <strong>@paupaulanguages</strong></p>
       `;
 
-      // Email academia/profe con detalle
-      // Intento recuperar el form_json del grupo (cualquiera de las reservas lo tiene)
+      /* ========== FORMATEO DEL FORMULARIO PARA ACADEMIA/PROFE ========== */
       let formJson = {};
       try {
         const f = await pool.query(`SELECT form_json FROM reservas WHERE id = $1 LIMIT 1`, [targetIds[0]]);
         formJson = f?.rows?.[0]?.form_json || {};
       } catch (_) {}
 
-      const formPretty = `
-        <ul>
-          ${Object.entries(formJson).map(([k,v]) => `<li><strong>${k}:</strong> ${String(v)}</li>`).join('')}
-        </ul>
-      `;
+      /** Helpers */
+      const pick = (obj, ...keys) => keys.map(k => (obj && obj[k] != null ? String(obj[k]) : ''));
 
+      function formatDOB(f) {
+        // acepta "nacimiento" ya armado o los 3 campos por separado
+        if (f.nacimiento) return String(f.nacimiento);
+        const d = f['dob-dia'] ? String(f['dob-dia']).padStart(2, '0') : '';
+        const m = f['dob-mes'] ? String(f['dob-mes']).padStart(2, '0') : '';
+        const y = f['dob-anio'] ? String(f['dob-anio']) : '';
+        if (y) return `${d || '01'}-${m || '01'}-${y}`;
+        return '';
+      }
+      function formatPhone(f) {
+        // intenta whatsapp, telefono o phone; evita confundir con emails
+        const cand = String(f.whatsapp || f.telefono || f.phone || '').trim();
+        return cand.includes('@') ? '' : cand;
+      }
+      function escapeHTML(s) {
+        return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+      }
+
+      // Campos pedidos (en el orden requerido)
+      const [
+        nombreForm,
+        dniForm,
+        emailForm,
+        paisForm,
+        idiomaForm,
+        nivelForm,
+        frecForm,
+        profForm
+      ] = pick(formJson, 'nombre','dni','email','pais','idioma','nivel','frecuencia','profesor');
+
+      const fechaNacForm = formatDOB(formJson);
+      const whatsappForm = formatPhone(formJson);
+
+      // Horarios elegidos ya formateados arriba en horariosTxt (Lunes 10:00; Martes 11:00)
       const adminHtml = `
         <h2>Nueva inscripción confirmada</h2>
         <ul>
-          <li><strong>Alumno:</strong> ${alumnoNombre} (${alumnoEmail})</li>
-          <li><strong>Profesor:</strong> ${profesorName} ${profEmail ? `(${profEmail})` : ''}</li>
-          <li><strong>Horarios:</strong> ${horariosTxt}</li>
+          <li><strong>Alumno:</strong> ${escapeHTML(alumnoNombre)} (${escapeHTML(alumnoEmail)})</li>
+          <li><strong>Profesor:</strong> ${escapeHTML(profesorName)} ${profEmail ? `(${escapeHTML(profEmail)})` : ''}</li>
+          <li><strong>Horarios:</strong> ${escapeHTML(horariosTxt)}</li>
           <li><strong>Reservas:</strong> ${targetIds.join(', ')}</li>
-          ${meta?.id ? `<li><strong>MP Payment ID:</strong> ${meta.id}</li>` : ''}
+          ${meta?.id ? `<li><strong>MP Payment ID:</strong> ${escapeHTML(meta.id)}</li>` : ''}
         </ul>
+
         <h3>Formulario</h3>
-        ${formPretty}
+        <ul>
+          <li><strong>nombre:</strong> ${escapeHTML(nombreForm || alumnoNombre)}</li>
+          <li><strong>DNI:</strong> ${escapeHTML(dniForm)}</li>
+          <li><strong>fecha de nacimiento:</strong> ${escapeHTML(fechaNacForm)}</li>
+          <li><strong>mail:</strong> ${escapeHTML(emailForm || alumnoEmail)}</li>
+          <li><strong>whatsapp:</strong> ${escapeHTML(whatsappForm)}</li>
+          <li><strong>país donde vive:</strong> ${escapeHTML(paisForm)}</li>
+          <li><strong>idioma a inscribirse:</strong> ${escapeHTML(idiomaForm)}</li>
+          <li><strong>resultado test nivelatorio:</strong> ${escapeHTML(nivelForm)}</li>
+          <li><strong>clases por semana:</strong> ${escapeHTML(frecForm)}</li>
+          <li><strong>profesor:</strong> ${escapeHTML(profForm || profesorName)}</li>
+          <li><strong>horarios disponibles elegidos:</strong> ${escapeHTML(horariosTxt)}</li>
+        </ul>
       `;
 
       // enviar
