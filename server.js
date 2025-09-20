@@ -335,22 +335,24 @@ app.post('/webhook', async (req, res) => {
       const horariosTxt  = rows.map(r => `${r.dia_semana} ${r.hora}`).join('; ');
       const profEmail    = PROF_EMAILS[profesorName] || '';
 
-      // Email alumno
+      // Email alumno — versión robusta (no se corta)
       const alumnoHtml = `
-        <p>¡Hola ${alumnoNombre}!</p>
-        <p>¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
-        <p>En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.</p>
-        <p><strong>Tu docente:</strong> ${profesorName}.<br>
-        <strong>Tus horarios:</strong> ${horariosTxt} (hora Argentina).</p>
-        <p>Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.</p>
-        <p>Más cerca de la fecha de inicio tu docente te enviará los links de acceso.</p>
-        <p><strong>Profesor/tutor:</strong> ${profesorName}<br>
-        <strong>Correo del profesor:</strong> ${profEmail || '(lo recibirás pronto)'}</p>
-        <p><strong>Aranceles:</strong> Se abonan del 1 al 7 de cada mes por transferencia bancaria. En caso de no abonar en tiempo y forma, las clases se suspenderán.</p>
-        <p>Esperamos que tu experiencia sea increíble. Si surgen dudas, escribime a mí o a tu profesor/a.</p>
-        <p>¡Que tengas una excelente experiencia!<br>
-        Ana Paula Toledo Del Grosso, Founder of PauPauLanguages.</p>
-        <p>Instagram: <strong>@paupaulanguages</strong></p>
+        <div>
+          <p>Hola ${alumnoNombre}!</p>
+          <p>¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
+          <p>En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.</p>
+          <p><strong>Tu docente:</strong> ${profesorName}.<br>
+          <strong>Tus horarios:</strong> ${horariosTxt} (hora Argentina).</p>
+          <p>Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.</p>
+          <p>Más cerca de la fecha de inicio tu docente te enviará los links de acceso.</p>
+          <p><strong>Profesor/tutor:</strong> ${profesorName}<br>
+          <strong>Correo del profesor:</strong> ${profEmail || '(lo recibirás pronto)'}</p>
+          <p><strong>Aranceles:</strong> Se abonan del 1 al 7 de cada mes por transferencia bancaria. En caso de no abonar en tiempo y forma, las clases se suspenderán.</p>
+          <p>Esperamos que tu experiencia sea increíble. Si surgen dudas, escribime a mí o a tu profesor/a.</p>
+          <p>¡Que tengas una excelente experiencia!<br>
+          Ana Paula Toledo Del Grosso, Founder of PauPau Languages.</p>
+          <p>Instagram: <strong>@paupaulanguages</strong></p>
+        </div>
       `;
 
       /* ========== FORMULARIO PARA ACADEMIA/PROFE (incluye extra_info) ========== */
