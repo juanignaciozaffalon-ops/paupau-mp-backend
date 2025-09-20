@@ -279,7 +279,7 @@ app.post('/crear-preferencia', async (req, res) => {
 
   if (ids.length === 0) return res.status(400).json({ error: 'bad_request', message: 'horarios_ids/horario_id requerido' });
 
-  // Generar un group_ref si hay más de un horario (o siempre, para unificar)
+  // Generar un group_ref
   const groupRef = genGroupRef();
 
   try {
@@ -321,12 +321,13 @@ app.post('/crear-preferencia', async (req, res) => {
 
     await pool.query('COMMIT');
 
-    // Crear preferencia MP (guardamos group_ref en metadata)
+    // Crear preferencia MP: metadata + external_reference (clave)
     const pref = {
       items: [{ title, quantity: 1, unit_price: price, currency_id: currency }],
       back_urls,
       auto_return: 'approved',
-      metadata: { ...metadata, group_ref: groupRef }
+      metadata: { ...metadata, group_ref: groupRef },
+      external_reference: groupRef   // 👈 MUY IMPORTANTE
     };
 
     const mpResp = await mercadopago.preferences.create(pref);
@@ -359,18 +360,24 @@ app.post('/webhook', async (req, res) => {
   let groupRef =
     evento?.data?.metadata?.group_ref ||
     evento?.data?.payment?.metadata?.group_ref ||
+    evento?.data?.external_reference ||   // 👈 por si viene directo en el webhook
     null;
 
-  // Intentar completar datos consultando el pago
   try {
+    // Si falta info, consultamos el pago en MP
     if (!paymentId || !groupRef) {
       if (evento?.data?.id) paymentId = evento.data.id;
       if (paymentId) {
         const pay = await mercadopago.payment.findById(paymentId).catch(() => null);
         const body = pay?.response || pay?.body || {};
         paymentId = paymentId || body?.id;
-        groupRef  = groupRef || body?.metadata?.group_ref || null;
 
+        // 1) intentar metadata
+        groupRef = groupRef || body?.metadata?.group_ref || null;
+        // 2) fallback a external_reference (confiable)
+        groupRef = groupRef || body?.external_reference || null;
+
+        // asegurarnos que el pago esté aprobado
         const status = String(body?.status || '').toLowerCase();
         if (status && status !== 'approved') return res.sendStatus(200);
       }
@@ -378,6 +385,7 @@ app.post('/webhook', async (req, res) => {
   } catch (e) {
     console.warn('[webhook] no se pudo consultar payment:', e?.message);
   }
+
   if (!groupRef) return res.sendStatus(200);
 
   try {
