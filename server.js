@@ -1,4 +1,4 @@
-// server.js — PauPau Backend (MP + Postgres + Admin + Emails) — MULTI HORARIOS
+// server.js — PauPau Backend (MP + Postgres + Admin + Emails) — MULTI HORARIOS + extra_info
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -137,7 +137,7 @@ app.get('/horarios', async (_req, res) => {
   }
 });
 
-// Hold simple (una reserva) — se mantiene para compatibilidad
+// Hold simple (una reserva) — compatibilidad
 app.post('/hold', async (req, res) => {
   const { horario_id, alumno_nombre, alumno_email } = req.body || {};
   if (!horario_id) return res.status(400).json({ error: 'bad_request', message: 'horario_id requerido' });
@@ -184,12 +184,10 @@ app.post('/crear-preferencia', async (req, res) => {
   const {
     title, price, currency='ARS', back_urls = {},
     metadata = {},
-    // nuevo: array
-    horarios_ids,
-    // compat: 1 horario
-    horario_id,
+    horarios_ids, // array de IDs de horarios
+    horario_id,   // compat: un solo horario
     alumno_nombre, alumno_email,
-    form // JSON plano del formulario
+    form // JSON plano del formulario (lo guardamos en reservas.form_json)
   } = req.body || {};
 
   if (!title || typeof title !== 'string') return res.status(400).json({ error: 'bad_request', message: 'title requerido' });
@@ -205,14 +203,13 @@ app.post('/crear-preferencia', async (req, res) => {
   const name  = (alumno_nombre && String(alumno_nombre).trim()) || 'N/A';
   const email = (alumno_email  && String(alumno_email).trim())  || 'noemail@paupau.local';
 
-  // grupo de reservas
   const groupRef = uuid();
   const reservasIds = [];
 
   try {
     await pool.query('BEGIN');
 
-    // verificamos disponibilidad de TODOS
+    // verificar disponibilidad de TODOS
     const canQ = `
       SELECT h.id
       FROM horarios h
@@ -230,7 +227,7 @@ app.post('/crear-preferencia', async (req, res) => {
     const can = await pool.query(canQ, [list]);
     if (can.rowCount !== list.length) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
 
-    // insertamos todas las reservas como pendientes (hold 10 min)
+    // insertar reservas pendientes (hold 10 min)
     const insQ = `
       INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta, group_ref, form_json)
       VALUES ($1,$2,$3,'pendiente', now() + interval '10 minutes', $4, $5::jsonb)
@@ -248,7 +245,7 @@ app.post('/crear-preferencia', async (req, res) => {
     return res.status(500).json({ error: 'db_error' });
   }
 
-  // armamos preferencia con metadata del grupo
+  // preferencia con metadata de grupo
   try {
     const pref = {
       items: [{ title, quantity: 1, unit_price: price, currency_id: currency }],
@@ -282,7 +279,7 @@ app.post('/crear-preferencia', async (req, res) => {
 app.post('/webhook', async (req, res) => {
   const evento = req.body;
   try {
-    // Intentamos ubicar payment y metadata
+    // intentar ubicar metadata
     let pagoId = evento?.data?.id || evento?.data?.payment?.id || null;
     let meta = evento?.data?.metadata || evento?.data?.id?.metadata || null;
 
@@ -292,17 +289,14 @@ app.post('/webhook', async (req, res) => {
       meta = body?.metadata || null;
     }
 
-    // Si no es un evento de payment, OK 200 y salimos
     const isPayment = (evento?.type === 'payment') || (evento?.action?.includes('payment'));
     if (!isPayment) return res.sendStatus(200);
 
-    // si el pago no está aprobado todavía, salir
     if (evento?.data?.status && evento.data.status !== 'approved') return res.sendStatus(200);
 
     const reservasIds = Array.isArray(meta?.reservas_ids) ? meta.reservas_ids.map(Number).filter(Boolean) : [];
     const groupRef    = meta?.group_ref || null;
 
-    // buscamos las reservas del grupo (por ids o por group_ref)
     let targetIds = reservasIds;
     if (!targetIds.length && groupRef) {
       const r = await pool.query(`SELECT id FROM reservas WHERE group_ref = $1`, [groupRef]);
@@ -310,7 +304,7 @@ app.post('/webhook', async (req, res) => {
     }
     if (!targetIds.length) return res.sendStatus(200);
 
-    // Marcamos pagadas
+    // Confirmar (pagado)
     await pool.query(
       `UPDATE reservas
          SET estado='pagado', reservado_hasta=NULL
@@ -319,9 +313,8 @@ app.post('/webhook', async (req, res) => {
     );
     console.log(`[webhook] Confirmadas reservas: ${targetIds.join(', ')}`);
 
-    // Emails (si hay SMTP)
+    // Emails
     if (transporter) {
-      // obtenemos info de horarios y profesor
       const infoQ = `
         SELECT r.id AS reserva_id,
                r.alumno_nombre, r.alumno_email,
@@ -342,7 +335,7 @@ app.post('/webhook', async (req, res) => {
       const horariosTxt  = rows.map(r => `${r.dia_semana} ${r.hora}`).join('; ');
       const profEmail    = PROF_EMAILS[profesorName] || '';
 
-      // Email alumno (bienvenida)
+      // Email alumno
       const alumnoHtml = `
         <p>¡Hola ${alumnoNombre}!</p>
         <p>¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
@@ -360,18 +353,16 @@ app.post('/webhook', async (req, res) => {
         <p>Instagram: <strong>@paupaulanguages</strong></p>
       `;
 
-      /* ========== FORMATEO DEL FORMULARIO PARA ACADEMIA/PROFE ========== */
+      /* ========== FORMULARIO PARA ACADEMIA/PROFE (incluye extra_info) ========== */
       let formJson = {};
       try {
         const f = await pool.query(`SELECT form_json FROM reservas WHERE id = $1 LIMIT 1`, [targetIds[0]]);
         formJson = f?.rows?.[0]?.form_json || {};
       } catch (_) {}
 
-      /** Helpers */
       const pick = (obj, ...keys) => keys.map(k => (obj && obj[k] != null ? String(obj[k]) : ''));
 
       function formatDOB(f) {
-        // acepta "nacimiento" ya armado o los 3 campos por separado
         if (f.nacimiento) return String(f.nacimiento);
         const d = f['dob-dia'] ? String(f['dob-dia']).padStart(2, '0') : '';
         const m = f['dob-mes'] ? String(f['dob-mes']).padStart(2, '0') : '';
@@ -380,15 +371,13 @@ app.post('/webhook', async (req, res) => {
         return '';
       }
       function formatPhone(f) {
-        // intenta whatsapp, telefono o phone; evita confundir con emails
         const cand = String(f.whatsapp || f.telefono || f.phone || '').trim();
         return cand.includes('@') ? '' : cand;
       }
       function escapeHTML(s) {
-        return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
       }
 
-      // Campos pedidos (en el orden requerido)
       const [
         nombreForm,
         dniForm,
@@ -402,8 +391,8 @@ app.post('/webhook', async (req, res) => {
 
       const fechaNacForm = formatDOB(formJson);
       const whatsappForm = formatPhone(formJson);
+      const extraInfo    = String(formJson.extra_info || '').trim();
 
-      // Horarios elegidos ya formateados arriba en horariosTxt (Lunes 10:00; Martes 11:00)
       const adminHtml = `
         <h2>Nueva inscripción confirmada</h2>
         <ul>
@@ -427,10 +416,10 @@ app.post('/webhook', async (req, res) => {
           <li><strong>clases por semana:</strong> ${escapeHTML(frecForm)}</li>
           <li><strong>profesor:</strong> ${escapeHTML(profForm || profesorName)}</li>
           <li><strong>horarios disponibles elegidos:</strong> ${escapeHTML(horariosTxt)}</li>
+          ${extraInfo ? `<li><strong>¿Algo para acompañarlo mejor? (extra_info):</strong> ${escapeHTML(extraInfo)}</li>` : ''}
         </ul>
       `;
 
-      // enviar
       try {
         if (alumnoEmail) {
           await transporter.sendMail({
