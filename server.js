@@ -374,9 +374,10 @@ app.post('/webhook', async (req, res) => {
         const cand = String(f.whatsapp || f.telefono || f.phone || '').trim();
         return cand.includes('@') ? '' : cand;
       }
-      function escapeHTML(s) {
-        return String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]);
-      }
+      function escapeHTML(s){
+  const map = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' };
+  return String(s ?? '').replace(/[&<>"]/g, ch => map[ch]);
+}
 
       const [
         nombreForm,
