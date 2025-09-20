@@ -375,9 +375,9 @@ app.post('/webhook', async (req, res) => {
         return cand.includes('@') ? '' : cand;
       }
       function escapeHTML(s){
-  const map = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' };
-  return String(s ?? '').replace(/[&<>"]/g, ch => map[ch]);
-}
+        const map = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' };
+        return String(s ?? '').replace(/[&<>"]/g, ch => map[ch]);
+      }
 
       const [
         nombreForm,
@@ -417,7 +417,7 @@ app.post('/webhook', async (req, res) => {
           <li><strong>clases por semana:</strong> ${escapeHTML(frecForm)}</li>
           <li><strong>profesor:</strong> ${escapeHTML(profForm || profesorName)}</li>
           <li><strong>horarios disponibles elegidos:</strong> ${escapeHTML(horariosTxt)}</li>
-          ${extraInfo ? `<li><strong>¿Algo para acompañarlo mejor? (extra_info):</strong> ${escapeHTML(extraInfo)}</li>` : ''}
+          ${extraInfo ? `<li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML(extraInfo)}</li>` : ''}
         </ul>
       `;
 
@@ -543,7 +543,7 @@ app.get('/admin/horarios', requireAdmin, async (req, res) => {
     let where = '';
     if (profesor_id) { where = 'WHERE h.profesor_id=$1'; params.push(profesor_id); }
     const q = `
-      SELECT h.id, h.profesor_id, p.nombre AS profesor, h.dia_semana, to_char(h.hora,'HH24:MI') AS hora,
+      SELECT h.id, h.profesor_id, p.nombre AS profesor, h.dia_semana, to_char(hora,'HH24:MI') AS hora,
              ${STATE_CASE} AS estado,
              ${HAS_PAGADO}, ${HAS_BLOQ}, ${HAS_PEND}
       FROM horarios h
