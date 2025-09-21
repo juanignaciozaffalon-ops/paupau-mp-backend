@@ -103,7 +103,7 @@ const PROF_EMAILS = {
   'Lourdes':  'paupaulanguages2@gmail.com',
   'Santiago': 'paupaulanguages10@gmail.com',
   'Milena':   'paupaulanguages13@gmail.com',
-  'Gissel':   'paauutooledo@gmail.com',
+  'Gissel':   'paupaulanguages3@gmail.com',
   'Heliana':  'paupaulanguages9@gmail.com'
 };
 
