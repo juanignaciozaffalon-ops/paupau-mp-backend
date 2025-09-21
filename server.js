@@ -1,4 +1,4 @@
-// server.js — PauPau Backend (MP + Postgres + Admin + Emails) — MULTI HORARIOS + extra_info
+// server.js — PauPau Backend (MP + Postgres + Admin + Emails) — MULTI HORARIOS + extra_info + modalidad/grupal
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -179,15 +179,15 @@ app.post('/hold', async (req, res) => {
   }
 });
 
-// Crear preferencia — **multi horarios**
+// Crear preferencia — **individual** (con reservas) o **grupal** (sin reservas)
 app.post('/crear-preferencia', async (req, res) => {
   const {
     title, price, currency='ARS', back_urls = {},
     metadata = {},
-    horarios_ids, // array de IDs de horarios
+    horarios_ids, // array de IDs de horarios (solo individual)
     horario_id,   // compat: un solo horario
     alumno_nombre, alumno_email,
-    form // JSON plano del formulario (lo guardamos en reservas.form_json)
+    form // JSON plano del formulario (lo guardamos en reservas.form_json en individual)
   } = req.body || {};
 
   if (!title || typeof title !== 'string') return res.status(400).json({ error: 'bad_request', message: 'title requerido' });
@@ -195,10 +195,16 @@ app.post('/crear-preferencia', async (req, res) => {
   if (!/^[A-Z]{3}$/.test(currency)) return res.status(400).json({ error: 'bad_request', message: 'currency inválida' });
   if (!MP_TOKEN) return res.status(500).json({ error: 'server_config', message: 'MP_ACCESS_TOKEN no configurado' });
 
+  const modalidad = (form && String(form.modalidad || 'individual').toLowerCase()) || 'individual';
+
   // normalizamos lista de horarios
   let list = Array.isArray(horarios_ids) ? horarios_ids.map(Number).filter(Boolean) : [];
   if (!list.length && Number(horario_id)) list = [Number(horario_id)];
-  if (!list.length) return res.status(400).json({ error: 'bad_request', message: 'horarios_ids o horario_id requerido' });
+
+  // Para INDIVIDUAL requerimos horarios; para GRUPAL no
+  if (modalidad === 'individual' && !list.length) {
+    return res.status(400).json({ error: 'bad_request', message: 'horarios_ids o horario_id requerido para modalidad individual' });
+  }
 
   const name  = (alumno_nombre && String(alumno_nombre).trim()) || 'N/A';
   const email = (alumno_email  && String(alumno_email).trim())  || 'noemail@paupau.local';
@@ -206,46 +212,63 @@ app.post('/crear-preferencia', async (req, res) => {
   const groupRef = uuid();
   const reservasIds = [];
 
-  try {
-    await pool.query('BEGIN');
+  if (modalidad === 'individual') {
+    try {
+      await pool.query('BEGIN');
 
-    // verificar disponibilidad de TODOS
-    const canQ = `
-      SELECT h.id
-      FROM horarios h
-      WHERE h.id = ANY($1::int[])
-        AND NOT EXISTS (
-          SELECT 1 FROM reservas r
-          WHERE r.horario_id=h.id
-            AND (
-              r.estado='pagado' OR
-              r.estado='bloqueado' OR
-              (r.estado='pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta>now())
-            )
-        )
-    `;
-    const can = await pool.query(canQ, [list]);
-    if (can.rowCount !== list.length) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
+      // verificar disponibilidad de TODOS
+      const canQ = `
+        SELECT h.id
+        FROM horarios h
+        WHERE h.id = ANY($1::int[])
+          AND NOT EXISTS (
+            SELECT 1 FROM reservas r
+            WHERE r.horario_id=h.id
+              AND (
+                r.estado='pagado' OR
+                r.estado='bloqueado' OR
+                (r.estado='pendiente' AND r.reservado_hasta IS NOT NULL AND r.reservado_hasta>now())
+              )
+          )
+      `;
+      const can = await pool.query(canQ, [list]);
+      if (can.rowCount !== list.length) { await pool.query('ROLLBACK'); return res.status(409).json({ error: 'not_available' }); }
 
-    // insertar reservas pendientes (hold 10 min)
-    const insQ = `
-      INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta, group_ref, form_json)
-      VALUES ($1,$2,$3,'pendiente', now() + interval '10 minutes', $4, $5::jsonb)
-      RETURNING id
-    `;
-    for (const hid of list) {
-      const r = await pool.query(insQ, [hid, name, email, groupRef, form ? JSON.stringify(form) : JSON.stringify({})]);
-      reservasIds.push(r.rows[0].id);
+      // insertar reservas pendientes (hold 10 min)
+      const insQ = `
+        INSERT INTO reservas (horario_id, alumno_nombre, alumno_email, estado, reservado_hasta, group_ref, form_json)
+        VALUES ($1,$2,$3,'pendiente', now() + interval '10 minutes', $4, $5::jsonb)
+        RETURNING id
+      `;
+      for (const hid of list) {
+        const r = await pool.query(insQ, [hid, name, email, groupRef, form ? JSON.stringify(form) : JSON.stringify({})]);
+        reservasIds.push(r.rows[0].id);
+      }
+
+      await pool.query('COMMIT');
+    } catch (e) {
+      await pool.query('ROLLBACK');
+      console.error('[crear-preferencia] DB error', e);
+      return res.status(500).json({ error: 'db_error' });
     }
-
-    await pool.query('COMMIT');
-  } catch (e) {
-    await pool.query('ROLLBACK');
-    console.error('[crear-preferencia] DB error', e);
-    return res.status(500).json({ error: 'db_error' });
   }
+  // Si es GRUPAL no insertamos reservas (no se manejan cupos en admin)
 
-  // preferencia con metadata de grupo
+  // Construimos metadata para MP (webhook la va a leer)
+  const form_preview = form ? {
+    nombre:      String(form.nombre || ''),
+    dni:         String(form.dni || ''),
+    nacimiento:  String(form.nacimiento || ''),
+    email:       String(form.email || ''),
+    whatsapp:    String(form.whatsapp || ''),
+    pais:        String(form.pais || ''),
+    idioma:      String(form.idioma || ''),
+    nivel:       String(form.nivel || ''),
+    frecuencia:  String(form.frecuencia || ''),
+    profesor:    String(form.profesor || ''),
+    extra_info:  String(form.extra_info || ''),
+  } : null;
+
   try {
     const pref = {
       items: [{ title, quantity: 1, unit_price: price, currency_id: currency }],
@@ -256,7 +279,11 @@ app.post('/crear-preferencia', async (req, res) => {
         group_ref: groupRef,
         reservas_ids: reservasIds,
         alumno_nombre: name,
-        alumno_email: email
+        alumno_email: email,
+        modalidad,
+        teacher: form?.profesor || metadata?.teacher || null,
+        grupo_label: form?.grupo_label || metadata?.grupo_label || null,
+        form_preview
       }
     };
     const mpResp = await mercadopago.preferences.create(pref);
@@ -275,7 +302,7 @@ app.post('/crear-preferencia', async (req, res) => {
   }
 });
 
-// Webhook: marca pagado **todas** las reservas del grupo y envía emails
+// Webhook: marca pagado **todas** las reservas (solo individual) y envía emails (ambas modalidades)
 app.post('/webhook', async (req, res) => {
   const evento = req.body;
   try {
@@ -294,6 +321,115 @@ app.post('/webhook', async (req, res) => {
 
     if (evento?.data?.status && evento.data.status !== 'approved') return res.sendStatus(200);
 
+    const modalidad = String(meta?.modalidad || 'individual').toLowerCase();
+
+    // ===== Modalidad GRUPAL: no hay reservas en DB, se arma todo con meta =====
+    if (modalidad === 'grupal') {
+      const alumnoNombre = meta?.alumno_nombre || 'Alumno';
+      const alumnoEmail  = meta?.alumno_email  || '';
+      const profesorName = meta?.teacher || 'Profesor';
+      const horariosTxt  = meta?.grupo_label || ''; // ej: "Inicial (Lunes y Miércoles 15:00)"
+      const profEmail    = PROF_EMAILS[profesorName] || '';
+      const pv           = meta?.form_preview || {};
+      const extraInfo    = (pv?.extra_info || '').trim();
+
+      // Email alumno — plantilla estética (no se corta)
+      const alumnoHtml = `<!doctype html>
+<html lang="es" style="margin:0;padding:0;">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width"/>
+  <title>Bienvenida PauPau Languages</title>
+</head>
+<body style="margin:0; padding:0; background:#f6f7fb;">
+  <center style="width:100%; background:#f6f7fb; padding:24px 12px;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px; margin:0 auto;">
+      <tr><td>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
+               style="background:#ffffff; border-radius:16px; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.08);">
+          <tr><td style="background:#3954A5; height:6px; font-size:0; line-height:0;">&nbsp;</td></tr>
+          <tr><td style="padding:28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; color:#222;">
+            <h1 style="margin:0 0 14px; font-size:22px; line-height:1.35;">¡Hola ${alumnoNombre}!</h1>
+            <p style="margin:0 0 10px; font-size:15px; line-height:1.6;">¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
+            <p style="margin:0 0 18px; font-size:15px; line-height:1.6;">En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.</p>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                   style="background:#f7f8ff; border:1px solid #e4e7ff; border-radius:12px; padding:14px; margin:6px 0 16px;">
+              <tr><td style="font-size:14px; line-height:1.6; color:#1d2340;">
+                <div style="margin:0 0 8px;"><strong>Modalidad:</strong> Clases grupales</div>
+                <div style="margin:0 0 8px;"><strong>Tu docente:</strong> ${profesorName}</div>
+                <div style="margin:0 0 8px;"><strong>Grupo:</strong> ${horariosTxt} <span style="color:#5b64a5;">(hora Argentina)</span></div>
+                <div style="margin:0 0 8px;"><strong>Profesor/tutor:</strong> ${profesorName}</div>
+                <div style="margin:0;"><strong>Correo del profesor:</strong> ${profEmail || '(lo recibirás pronto)'}</div>
+              </td></tr>
+            </table>
+            <p style="margin:0 0 10px; font-size:15px; line-height:1.6;">Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.</p>
+            <p style="margin:0 0 18px; font-size:15px; line-height:1.6;">Más cerca de la fecha de inicio tu docente te enviará los links de acceso.</p>
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"
+                   style="background:#fff8ee; border:1px solid #ffe2b9; border-radius:12px; padding:14px; margin:0 0 18px;">
+              <tr><td style="font-size:14px; line-height:1.6; color:#8a4a00;">
+                <strong>Aranceles:</strong> Se abonan del 1 al 7 de cada mes por transferencia bancaria.
+                En caso de no abonar en tiempo y forma, las clases se suspenderán.
+              </td></tr>
+            </table>
+            <p style="margin:0 0 4px; font-size:14px; line-height:1.6; color:#4b4f66;">Si surge cualquier duda, escribinos cuando quieras.</p>
+          </td></tr>
+          <tr><td style="padding:18px 28px 26px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;">
+            <div style="font-size:13px; color:#707797; line-height:1.6;">
+              <div style="margin:0 0 4px;"><strong style="color:#3954A5;">PauPau Languages</strong></div>
+              <div>Instagram: <strong>@paupaulanguages</strong></div>
+            </div>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </center>
+</body>
+</html>`;
+
+      // Admin/Profe (incluye extra_info si vino)
+      function escapeHTML(s){
+        const map = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' };
+        return String(s ?? '').replace(/[&<>"]/g, ch => map[ch]);
+      }
+      const adminHtml = `
+        <h2>Nueva inscripción confirmada</h2>
+        <ul>
+          <li><strong>Modalidad:</strong> grupal</li>
+          <li><strong>Alumno:</strong> ${escapeHTML(alumnoNombre)} (${escapeHTML(alumnoEmail)})</li>
+          <li><strong>Profesor:</strong> ${escapeHTML(profesorName)} ${profEmail ? `(${escapeHTML(profEmail)})` : ''}</li>
+          <li><strong>Grupo:</strong> ${escapeHTML(horariosTxt)}</li>
+          ${meta?.id ? `<li><strong>MP Payment ID:</strong> ${escapeHTML(meta.id)}</li>` : ''}
+        </ul>
+        ${extraInfo ? `
+        <h3>Información adicional del alumno</h3>
+        <ul><li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML(extraInfo)}</li></ul>` : ''}
+      `;
+
+      try {
+        if (alumnoEmail) {
+          await transporter.sendMail({
+            from: FROM_EMAIL,
+            to: alumnoEmail,
+            subject: '¡Bienvenido/a a PauPau Languages!',
+            html: alumnoHtml
+          });
+        }
+        const toList = [ACADEMY_EMAIL].filter(Boolean);
+        const ccList = profEmail ? [profEmail] : [];
+        await transporter.sendMail({
+          from: FROM_EMAIL,
+          to: toList.join(','),
+          cc: ccList.join(',') || undefined,
+          subject: `Nueva inscripción confirmada (grupal): ${alumnoNombre} con ${profesorName}`,
+          html: adminHtml
+        });
+      } catch (e) {
+        console.error('[mail webhook grupal] fallo envío', e?.message);
+      }
+
+      return res.sendStatus(200);
+    }
+
+    // ===== Modalidad INDIVIDUAL: flujo actual con reservas =====
     const reservasIds = Array.isArray(meta?.reservas_ids) ? meta.reservas_ids.map(Number).filter(Boolean) : [];
     const groupRef    = meta?.group_ref || null;
 
@@ -335,7 +471,7 @@ app.post('/webhook', async (req, res) => {
       const horariosTxt  = rows.map(r => `${r.dia_semana} ${r.hora}`).join('; ');
       const profEmail    = PROF_EMAILS[profesorName] || '';
 
-      // Email alumno — versión robusta (no se corta)
+      // Email alumno — plantilla estética (la que ya te funcionaba)
       const alumnoHtml = `<!doctype html>
 <html lang="es" style="margin:0;padding:0;">
 <head>
@@ -343,7 +479,6 @@ app.post('/webhook', async (req, res) => {
   <meta name="viewport" content="width=device-width"/>
   <title>Bienvenida PauPau Languages</title>
   <style>
-    /* Fallbacks por si el cliente respeta <style> (la mayoría usa inline) */
     @media (max-width:600px){
       .container{width:100% !important; margin:0 !important; border-radius:0 !important;}
       .inner{padding:20px !important;}
@@ -355,29 +490,14 @@ app.post('/webhook', async (req, res) => {
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px; margin:0 auto;" class="container">
       <tr>
         <td style="padding:0;">
-          <!-- Card -->
           <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
                  style="background:#ffffff; border-radius:16px; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.08);">
-            <!-- Header bar -->
-            <tr>
-              <td style="background:#3954A5; height:6px; font-size:0; line-height:0;">&nbsp;</td>
-            </tr>
-
-            <!-- Content -->
+            <tr><td style="background:#3954A5; height:6px; font-size:0; line-height:0;">&nbsp;</td></tr>
             <tr>
               <td class="inner" style="padding:28px 28px 10px 28px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif; color:#222;">
-                <h1 style="margin:0 0 14px; font-size:22px; line-height:1.35; color:#1a1f36;">
-                  ¡Hola ${alumnoNombre}!
-                </h1>
-
-                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">
-                  ¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.
-                </p>
-                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">
-                  En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.
-                </p>
-
-                <!-- Info list -->
+                <h1 style="margin:0 0 14px; font-size:22px; line-height:1.35;">¡Hola ${alumnoNombre}!</h1>
+                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">¡Qué alegría que seas parte de nuestra Escuela! Estoy feliz de recibirte y darte la bienvenida.</p>
+                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">En Paupau Languages, conectamos personas con el mundo y desde hoy vos también sos parte de esa comunidad.</p>
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
                        style="background:#f7f8ff; border:1px solid #e4e7ff; border-radius:12px; padding:14px; margin:6px 0 16px;">
                   <tr>
@@ -389,14 +509,8 @@ app.post('/webhook', async (req, res) => {
                     </td>
                   </tr>
                 </table>
-
-                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">
-                  Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.
-                </p>
-                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">
-                  Más cerca de la fecha de inicio tu docente te enviará los links de acceso.
-                </p>
-
+                <p style="margin:0 0 10px; font-size:15px; line-height:1.6; color:#2a2f45;">Te pedimos puntualidad y cámara/micrófono encendidos para una mejor experiencia.</p>
+                <p style="margin:0 0 18px; font-size:15px; line-height:1.6; color:#2a2f45;">Más cerca de la fecha de inicio tu docente te enviará los links de acceso.</p>
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" 
                        style="background:#fff8ee; border:1px solid #ffe2b9; border-radius:12px; padding:14px; margin:0 0 18px;">
                   <tr>
@@ -406,14 +520,9 @@ app.post('/webhook', async (req, res) => {
                     </td>
                   </tr>
                 </table>
-
-                <p style="margin:0 0 4px; font-size:14px; line-height:1.6; color:#4b4f66;">
-                  Si surge cualquier duda, escribinos cuando quieras.
-                </p>
+                <p style="margin:0 0 4px; font-size:14px; line-height:1.6; color:#4b4f66;">Si surge cualquier duda, escribinos cuando quieras.</p>
               </td>
             </tr>
-
-            <!-- Footer -->
             <tr>
               <td style="padding:18px 28px 26px; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;">
                 <div style="font-size:13px; color:#707797; line-height:1.6;">
@@ -422,9 +531,7 @@ app.post('/webhook', async (req, res) => {
                 </div>
               </td>
             </tr>
-
           </table>
-          <!-- /Card -->
         </td>
       </tr>
     </table>
@@ -440,7 +547,6 @@ app.post('/webhook', async (req, res) => {
       } catch (_) {}
 
       const pick = (obj, ...keys) => keys.map(k => (obj && obj[k] != null ? String(obj[k]) : ''));
-
       function formatDOB(f) {
         if (f.nacimiento) return String(f.nacimiento);
         const d = f['dob-dia'] ? String(f['dob-dia']).padStart(2, '0') : '';
@@ -476,13 +582,13 @@ app.post('/webhook', async (req, res) => {
       const adminHtml = `
         <h2>Nueva inscripción confirmada</h2>
         <ul>
+          <li><strong>Modalidad:</strong> individual</li>
           <li><strong>Alumno:</strong> ${escapeHTML(alumnoNombre)} (${escapeHTML(alumnoEmail)})</li>
           <li><strong>Profesor:</strong> ${escapeHTML(profesorName)} ${profEmail ? `(${escapeHTML(profEmail)})` : ''}</li>
           <li><strong>Horarios:</strong> ${escapeHTML(horariosTxt)}</li>
           <li><strong>Reservas:</strong> ${targetIds.join(', ')}</li>
           ${meta?.id ? `<li><strong>MP Payment ID:</strong> ${escapeHTML(meta.id)}</li>` : ''}
         </ul>
-
         <h3>Formulario</h3>
         <ul>
           <li><strong>nombre:</strong> ${escapeHTML(nombreForm || alumnoNombre)}</li>
