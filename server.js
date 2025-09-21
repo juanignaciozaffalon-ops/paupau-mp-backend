@@ -333,7 +333,7 @@ app.post('/webhook', async (req, res) => {
       const pv           = meta?.form_preview || {};
       const extraInfo    = (pv?.extra_info || '').trim();
 
-      // Email alumno — plantilla estética (no se corta)
+      // Email alumno — plantilla estética (sin cambios)
       const alumnoHtml = `<!doctype html>
 <html lang="es" style="margin:0;padding:0;">
 <head>
@@ -385,23 +385,38 @@ app.post('/webhook', async (req, res) => {
 </body>
 </html>`;
 
-      // Admin/Profe (incluye extra_info si vino)
+      // === Admin/Profe (GRUPAL) — ahora con el MISMO formato que individual ===
       function escapeHTML(s){
         const map = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' };
         return String(s ?? '').replace(/[&<>"]/g, ch => map[ch]);
       }
+
       const adminHtml = `
         <h2>Nueva inscripción confirmada</h2>
         <ul>
           <li><strong>Modalidad:</strong> grupal</li>
           <li><strong>Alumno:</strong> ${escapeHTML(alumnoNombre)} (${escapeHTML(alumnoEmail)})</li>
           <li><strong>Profesor:</strong> ${escapeHTML(profesorName)} ${profEmail ? `(${escapeHTML(profEmail)})` : ''}</li>
-          <li><strong>Grupo:</strong> ${escapeHTML(horariosTxt)}</li>
+          <li><strong>Horarios:</strong> ${escapeHTML(horariosTxt)}</li>
+          <li><strong>Reservas:</strong> (no aplica en grupales)</li>
           ${meta?.id ? `<li><strong>MP Payment ID:</strong> ${escapeHTML(meta.id)}</li>` : ''}
         </ul>
-        ${extraInfo ? `
-        <h3>Información adicional del alumno</h3>
-        <ul><li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML(extraInfo)}</li></ul>` : ''}
+
+        <h3>Formulario</h3>
+        <ul>
+          <li><strong>nombre:</strong> ${escapeHTML(pv?.nombre || alumnoNombre)}</li>
+          <li><strong>DNI:</strong> ${escapeHTML(pv?.dni || '')}</li>
+          <li><strong>fecha de nacimiento:</strong> ${escapeHTML(pv?.nacimiento || '')}</li>
+          <li><strong>mail:</strong> ${escapeHTML(pv?.email || alumnoEmail)}</li>
+          <li><strong>whatsapp:</strong> ${escapeHTML(pv?.whatsapp || '')}</li>
+          <li><strong>país donde vive:</strong> ${escapeHTML(pv?.pais || '')}</li>
+          <li><strong>idioma a inscribirse:</strong> ${escapeHTML(pv?.idioma || '')}</li>
+          <li><strong>resultado test nivelatorio:</strong> ${escapeHTML(pv?.nivel || '')}</li>
+          <li><strong>clases por semana:</strong> ${escapeHTML(pv?.frecuencia || '')}</li>
+          <li><strong>profesor:</strong> ${escapeHTML(pv?.profesor || profesorName)}</li>
+          <li><strong>horarios disponibles elegidos:</strong> ${escapeHTML(horariosTxt)}</li>
+          ${extraInfo ? `<li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML(extraInfo)}</li>` : ''}
+        </ul>
       `;
 
       try {
@@ -471,7 +486,7 @@ app.post('/webhook', async (req, res) => {
       const horariosTxt  = rows.map(r => `${r.dia_semana} ${r.hora}`).join('; ');
       const profEmail    = PROF_EMAILS[profesorName] || '';
 
-      // Email alumno — plantilla estética (la que ya te funcionaba)
+      // Email alumno — estética ya probada
       const alumnoHtml = `<!doctype html>
 <html lang="es" style="margin:0;padding:0;">
 <head>
