@@ -6,6 +6,8 @@ const mercadopago = require('mercadopago');
 const { Pool } = require('pg');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+require('dotenv').config(); // NEW: dotenv
+const { createClient } = require('@supabase/supabase-js'); // NEW: supabase
 
 const app = express();
 
@@ -24,15 +26,23 @@ const SMTP_PASS     = process.env.SMTP_PASS || '';
 const FROM_EMAIL    = process.env.FROM_EMAIL || SMTP_USER || 'no-reply@paupau.local';
 const ACADEMY_EMAIL = process.env.ACADEMY_EMAIL || FROM_EMAIL;
 
+// NEW: Campus (Supabase + MP)
+const SUPABASE_URL          = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE || '';
+const FRONTEND_URL          = process.env.FRONTEND_URL || ''; // ej: https://tu-dominio.com/campus
+const WEBHOOK_SECRET        = process.env.WEBHOOK_SECRET || 'cambia-este-webhook-secret';
+const MONTHLY_FEE           = Number(process.env.MONTHLY_FEE || 50);
+
 /* ====== CORS ====== */
 app.use((req, res, next) => {
   const reqOrigin = req.headers.origin || '';
-  const ok = ALLOWED.includes(reqOrigin);
+  const ok = ALLOWED.includes(reqOrigin) || (FRONTEND_URL && reqOrigin === new URL(FRONTEND_URL).origin);
   if (ok) {
     res.header('Access-Control-Allow-Origin', reqOrigin);
     res.header('Vary', 'Origin');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Key');
     res.header('Access-Control-Allow-Methods', 'GET,POST,DELETE,PATCH,OPTIONS');
+    res.header('Access-Control-Allow-Credentials', 'true');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(ok ? 200 : 403);
   next();
@@ -111,7 +121,95 @@ const PROF_EMAILS = {
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 /* ============================================================
-   PÚBLICO
+   CAMPUS (Supabase) — NUEVO
+   Endpoints separados para no chocar con el flujo de inscripción existente
+============================================================ */
+const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE)
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE)
+  : null;
+
+function currentMonthYear() {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+
+// Crear preferencia de pago mensual del campus
+app.post('/campus/create-payment', async (req, res) => {
+  try {
+    if (!supabase) return res.status(500).json({ error: 'supabase_not_configured' });
+
+    const { user_id, amount } = req.body || {};
+    if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+
+    const price = Number(amount || MONTHLY_FEE || 50);
+
+    const pref = {
+      items: [
+        { title: `Cuota PauPau - ${currentMonthYear()}`, quantity: 1, currency_id: 'USD', unit_price: price }
+      ],
+      back_urls: {
+        success: FRONTEND_URL || '/',
+        failure: FRONTEND_URL || '/',
+        pending: FRONTEND_URL || '/'
+      },
+      auto_return: 'approved',
+      notification_url: `${process.env.RENDER_EXTERNAL_URL || ''}/campus/webhook?secret=${WEBHOOK_SECRET}`,
+      metadata: { user_id, context: 'campus' }
+    };
+
+    const result = await mercadopago.preferences.create(pref);
+    const prefId = result.body.id;
+
+    // Insertamos intento de pago del mes actual (idempotente por (user_id, month_year))
+    await supabase.from('payments').upsert({
+      user_id,
+      month_year: currentMonthYear(),
+      status: 'pending',
+      amount: price,
+      mp_preference_id: prefId,
+      context: 'campus'
+    }, { onConflict: 'user_id,month_year' });
+
+    return res.json({ init_point: result.body.init_point, preference_id: prefId });
+  } catch (err) {
+    console.error('[campus/create-payment] error', err);
+    return res.status(500).json({ error: 'create_preference_failed' });
+  }
+});
+
+// Webhook de Mercado Pago para el campus
+app.post('/campus/webhook', async (req, res) => {
+  try {
+    if (req.query.secret !== WEBHOOK_SECRET) return res.status(401).send('Invalid secret');
+    if (!supabase) return res.sendStatus(200);
+
+    const paymentId = req.body?.data?.id || req.body?.id;
+    if (!paymentId) return res.sendStatus(200);
+
+    const payment = await mercadopago.payment.findById(paymentId);
+    const status  = payment.body.status; // approved | rejected | pending
+    const meta    = payment.body.metadata || {};
+    const user_id = meta.user_id;
+
+    if (user_id) {
+      await supabase
+        .from('payments')
+        .update({ status, mp_payment_id: String(paymentId) })
+        .eq('user_id', user_id)
+        .eq('month_year', currentMonthYear());
+    }
+
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error('[campus/webhook] error', err);
+    return res.sendStatus(500);
+  }
+});
+
+/* ============================================================
+   PÚBLICO (flow de inscripción existente)
 ============================================================ */
 
 // Listado público (para el formulario)
@@ -302,7 +400,7 @@ app.post('/crear-preferencia', async (req, res) => {
   }
 });
 
-// Webhook: marca pagado **todas** las reservas (solo individual) y envía emails (ambas modalidades)
+// Webhook: EXISTENTE para inscripciones (individual/grupal)
 app.post('/webhook', async (req, res) => {
   const evento = req.body;
   try {
@@ -323,17 +421,16 @@ app.post('/webhook', async (req, res) => {
 
     const modalidad = String(meta?.modalidad || 'individual').toLowerCase();
 
-    // ===== Modalidad GRUPAL: no hay reservas en DB, se arma todo con meta =====
+    // ===== Modalidad GRUPAL =====
     if (modalidad === 'grupal') {
       const alumnoNombre = meta?.alumno_nombre || 'Alumno';
       const alumnoEmail  = meta?.alumno_email  || '';
       const profesorName = meta?.teacher || 'Profesor';
-      const horariosTxt  = meta?.grupo_label || ''; // ej: "Inicial (Lunes y Miércoles 15:00)"
+      const horariosTxt  = meta?.grupo_label || '';
       const profEmail    = PROF_EMAILS[profesorName] || '';
       const pv           = meta?.form_preview || {};
       const extraInfo    = (pv?.extra_info || '').trim();
 
-      // Email alumno — plantilla estética (sin cambios)
       const alumnoHtml = `<!doctype html>
 <html lang="es" style="margin:0;padding:0;">
 <head>
@@ -385,7 +482,6 @@ app.post('/webhook', async (req, res) => {
 </body>
 </html>`;
 
-      // === Admin/Profe (GRUPAL) — ahora con el MISMO formato que individual ===
       function escapeHTML(s){
         const map = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' };
         return String(s ?? '').replace(/[&<>"]/g, ch => map[ch]);
@@ -404,18 +500,18 @@ app.post('/webhook', async (req, res) => {
 
         <h3>Formulario</h3>
         <ul>
-          <li><strong>nombre:</strong> ${escapeHTML(pv?.nombre || alumnoNombre)}</li>
-          <li><strong>DNI:</strong> ${escapeHTML(pv?.dni || '')}</li>
-          <li><strong>fecha de nacimiento:</strong> ${escapeHTML(pv?.nacimiento || '')}</li>
-          <li><strong>mail:</strong> ${escapeHTML(pv?.email || alumnoEmail)}</li>
-          <li><strong>whatsapp:</strong> ${escapeHTML(pv?.whatsapp || '')}</li>
-          <li><strong>país donde vive:</strong> ${escapeHTML(pv?.pais || '')}</li>
-          <li><strong>idioma a inscribirse:</strong> ${escapeHTML(pv?.idioma || '')}</li>
-          <li><strong>resultado test nivelatorio:</strong> ${escapeHTML(pv?.nivel || '')}</li>
-          <li><strong>clases por semana:</strong> ${escapeHTML(pv?.frecuencia || '')}</li>
-          <li><strong>profesor:</strong> ${escapeHTML(pv?.profesor || profesorName)}</li>
+          <li><strong>nombre:</strong> ${escapeHTML((meta?.form_preview?.nombre) || alumnoNombre)}</li>
+          <li><strong>DNI:</strong> ${escapeHTML(meta?.form_preview?.dni || '')}</li>
+          <li><strong>fecha de nacimiento:</strong> ${escapeHTML(meta?.form_preview?.nacimiento || '')}</li>
+          <li><strong>mail:</strong> ${escapeHTML(meta?.form_preview?.email || alumnoEmail)}</li>
+          <li><strong>whatsapp:</strong> ${escapeHTML(meta?.form_preview?.whatsapp || '')}</li>
+          <li><strong>país donde vive:</strong> ${escapeHTML(meta?.form_preview?.pais || '')}</li>
+          <li><strong>idioma a inscribirse:</strong> ${escapeHTML(meta?.form_preview?.idioma || '')}</li>
+          <li><strong>resultado test nivelatorio:</strong> ${escapeHTML(meta?.form_preview?.nivel || '')}</li>
+          <li><strong>clases por semana:</strong> ${escapeHTML(meta?.form_preview?.frecuencia || '')}</li>
+          <li><strong>profesor:</strong> ${escapeHTML(meta?.form_preview?.profesor || profesorName)}</li>
           <li><strong>horarios disponibles elegidos:</strong> ${escapeHTML(horariosTxt)}</li>
-          ${extraInfo ? `<li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML(extraInfo)}</li>` : ''}
+          ${(meta?.form_preview?.extra_info || '').trim() ? `<li><strong>¿Algo que debamos saber para acompañarte mejor?</strong> ${escapeHTML(meta.form_preview.extra_info)}</li>` : ''}
         </ul>
       `;
 
@@ -444,7 +540,7 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ===== Modalidad INDIVIDUAL: flujo actual con reservas =====
+    // ===== Modalidad INDIVIDUAL =====
     const reservasIds = Array.isArray(meta?.reservas_ids) ? meta.reservas_ids.map(Number).filter(Boolean) : [];
     const groupRef    = meta?.group_ref || null;
 
@@ -486,7 +582,6 @@ app.post('/webhook', async (req, res) => {
       const horariosTxt  = rows.map(r => `${r.dia_semana} ${r.hora}`).join('; ');
       const profEmail    = PROF_EMAILS[profesorName] || '';
 
-      // Email alumno — estética ya probada
       const alumnoHtml = `<!doctype html>
 <html lang="es" style="margin:0;padding:0;">
 <head>
