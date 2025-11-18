@@ -135,46 +135,82 @@ function currentMonthYear() {
   return `${y}-${m}`;
 }
 
-// Crear preferencia de pago mensual del campus
-app.post('/campus/create-payment', async (req, res) => {
-  try {
-    if (!supabase) return res.status(500).json({ error: 'supabase_not_configured' });
+/**
+ * Helper reutilizable para crear la preferencia de pago del CAMPUS
+ * - Crea la preferencia en MP con webhook /campus/webhook
+ * - Hace upsert en la tabla payments de Supabase para el mes actual
+ */
+async function createCampusPreferenceMP({ user_id, amount, currency = 'ARS', extraMetadata = {} }) {
+  if (!supabase) {
+    const err = new Error('supabase_not_configured');
+    throw err;
+  }
 
-    const { user_id, amount } = req.body || {};
-    if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+  const price = Number(amount || MONTHLY_FEE || 50);
 
-    const price = Number(amount || MONTHLY_FEE || 50);
+  const pref = {
+    items: [
+      {
+        title: `Cuota PauPau - ${currentMonthYear()}`,
+        quantity: 1,
+        currency_id: currency || 'ARS',
+        unit_price: price
+      }
+    ],
+    back_urls: {
+      success: FRONTEND_URL || '/',
+      failure: FRONTEND_URL || '/',
+      pending: FRONTEND_URL || '/'
+    },
+    auto_return: 'approved',
+    notification_url: `${process.env.RENDER_EXTERNAL_URL || ''}/campus/webhook?secret=${WEBHOOK_SECRET}`,
+    metadata: {
+      user_id,
+      context: 'campus',
+      ...extraMetadata
+    }
+  };
 
-    const pref = {
-      items: [
-        { title: `Cuota PauPau - ${currentMonthYear()}`, quantity: 1, currency_id: 'USD', unit_price: price }
-      ],
-      back_urls: {
-        success: FRONTEND_URL || '/',
-        failure: FRONTEND_URL || '/',
-        pending: FRONTEND_URL || '/'
-      },
-      auto_return: 'approved',
-      notification_url: `${process.env.RENDER_EXTERNAL_URL || ''}/campus/webhook?secret=${WEBHOOK_SECRET}`,
-      metadata: { user_id, context: 'campus' }
-    };
+  const result = await mercadopago.preferences.create(pref);
+  const prefId = result.body.id;
 
-    const result = await mercadopago.preferences.create(pref);
-    const prefId = result.body.id;
-
-    // Insertamos intento de pago del mes actual (idempotente por (user_id, month_year))
-    await supabase.from('payments').upsert({
+  await supabase.from('payments').upsert(
+    {
       user_id,
       month_year: currentMonthYear(),
       status: 'pending',
       amount: price,
       mp_preference_id: prefId,
       context: 'campus'
-    }, { onConflict: 'user_id,month_year' });
+    },
+    { onConflict: 'user_id,month_year' }
+  );
 
-    return res.json({ init_point: result.body.init_point, preference_id: prefId });
+  return {
+    init_point: result.body.init_point,
+    preference_id: prefId
+  };
+}
+
+// Crear preferencia de pago mensual del campus
+app.post('/campus/create-payment', async (req, res) => {
+  try {
+    const { user_id, amount, currency = 'ARS', metadata = {} } = req.body || {};
+    if (!user_id) return res.status(400).json({ error: 'user_id requerido' });
+
+    const out = await createCampusPreferenceMP({
+      user_id,
+      amount,
+      currency,
+      extraMetadata: metadata
+    });
+
+    return res.json(out);
   } catch (err) {
     console.error('[campus/create-payment] error', err);
+    if (err.message === 'supabase_not_configured') {
+      return res.status(500).json({ error: 'supabase_not_configured' });
+    }
     return res.status(500).json({ error: 'create_preference_failed' });
   }
 });
@@ -299,11 +335,39 @@ app.post('/crear-preferencia', async (req, res) => {
   let list = Array.isArray(horarios_ids) ? horarios_ids.map(Number).filter(Boolean) : [];
   if (!list.length && Number(horario_id)) list = [Number(horario_id)];
 
+  // 🔹 Detectamos si es un pago del CAMPUS (cuota mensual)
+  const isCampusPayment =
+    metadata && metadata.user_id && !form && !list.length;
+
   // Para INDIVIDUAL requerimos horarios; para GRUPAL no
-  if (modalidad === 'individual' && !list.length) {
+  if (modalidad === 'individual' && !list.length && !isCampusPayment) {
     return res.status(400).json({ error: 'bad_request', message: 'horarios_ids o horario_id requerido para modalidad individual' });
   }
 
+  // 🔹 Si es CAMPUS, usamos la lógica especial y NO tocamos reservas/horarios
+  if (isCampusPayment) {
+    try {
+      const out = await createCampusPreferenceMP({
+        user_id: metadata.user_id,
+        amount: price,
+        currency,
+        extraMetadata: metadata
+      });
+
+      return res.json({
+        init_point: out.init_point,
+        preference_id: out.preference_id
+      });
+    } catch (e) {
+      console.error('[crear-preferencia campus] error', e);
+      const msg = e.message === 'supabase_not_configured'
+        ? 'supabase_not_configured'
+        : 'campus_payment_failed';
+      return res.status(500).json({ error: msg });
+    }
+  }
+
+  // ======= FLUJO ORIGINAL DE INSCRIPCIÓN (NO CAMPUS) =======
   const name  = (alumno_nombre && String(alumno_nombre).trim()) || 'N/A';
   const email = (alumno_email  && String(alumno_email).trim())  || 'noemail@paupau.local';
 
